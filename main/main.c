@@ -11,7 +11,10 @@
 
 #include "gtg_soft_access_point.h"
 #include "gtg_wifi_station.h"
+#include "gtg_ntp.h"
 #include "credentials.h"
+
+static const char *TAG = "main";
 
 void app_main(void)
 {
@@ -36,7 +39,19 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     if (wifi_station_init(WIFI_SSID, WIFI_PASS) == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        ESP_ERROR_CHECK(gtg_ntp_init());
+
+        if (gtg_ntp_wait_for_sync(30000) == ESP_OK) {
+            char time_str[32];
+            for (int i = 0; i < 6; i++) {
+                if (gtg_ntp_get_local_time_str(time_str, sizeof(time_str)) == ESP_OK) {
+                    ESP_LOGI(TAG, "Swedish time: %s", time_str);
+                }
+                vTaskDelay(pdMS_TO_TICKS(10000));
+            }
+        }
+
+        gtg_ntp_deinit();
         wifi_station_deinit();
     }
 }
