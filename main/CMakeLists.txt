@@ -6,6 +6,7 @@ idf_component_register(
         "src/gtg_ntp.c"
         "src/gtg_https_server.c"
         "src/gtg_mdns.c"
+        "lib/cJSON/cJSON.c"
 
     PRIV_REQUIRES
         esp_wifi
@@ -22,6 +23,7 @@ idf_component_register(
     INCLUDE_DIRS
         "."
         "inc/"
+        "lib/cJSON/"
         "../cred/"
 )
 
