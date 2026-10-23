@@ -10,6 +10,8 @@
 #include "esp_event.h"
 
 #include "gtg_soft_access_point.h"
+#include "gtg_wifi_station.h"
+#include "credentials.h"
 
 void app_main(void)
 {
@@ -30,4 +32,11 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(60000));
 
     wifi_softap_deinit();
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    if (wifi_station_init(WIFI_SSID, WIFI_PASS) == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+        wifi_station_deinit();
+    }
 }
