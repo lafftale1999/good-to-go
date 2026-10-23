@@ -5,6 +5,7 @@ idf_component_register(
         "src/gtg_wifi_station.c"
         "src/gtg_ntp.c"
         "src/gtg_https_server.c"
+        "src/gtg_mdns.c"
 
     PRIV_REQUIRES
         esp_wifi

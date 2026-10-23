@@ -13,6 +13,7 @@
 #include "gtg_wifi_station.h"
 #include "gtg_ntp.h"
 #include "gtg_https_server.h"
+#include "gtg_mdns.h"
 #include "credentials.h"
 
 static const char *TAG = "main";
@@ -33,6 +34,7 @@ void app_main(void)
     wifi_ap_meta_t ap_cred;
     wifi_softap_init(&ap_cred);
 
+    ESP_ERROR_CHECK(gtg_mdns_init());
     ESP_ERROR_CHECK(gtg_https_server_init());
     /* vTaskDelay(pdMS_TO_TICKS(60000));
 
