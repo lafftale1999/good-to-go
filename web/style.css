@@ -14,3 +14,19 @@ main {
     padding: 0 16px;
     text-align: center;
 }
+
+form {
+    display: grid;
+    gap: 12px;
+    text-align: left;
+}
+
+label {
+    display: grid;
+    gap: 4px;
+}
+
+input, button {
+    font: inherit;
+    padding: 8px;
+}

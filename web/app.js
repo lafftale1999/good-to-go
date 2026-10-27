@@ -1,1 +1,76 @@
-document.getElementById("status").textContent = "Served from LittleFS on the ESP32.";
+const form = document.getElementById("wifi-form");
+const statusText = document.getElementById("status");
+
+const POLL_INTERVAL_MS = 1000;
+
+/* wifi_err_reason_t values from esp_wifi_types.h */
+const WRONG_PASSWORD_REASONS = [15, 202, 204];
+const NOT_FOUND_REASONS = [201];
+const UNSUPPORTED_SECURITY_REASONS = [210, 211];
+
+function failureMessage(reason) {
+    if (WRONG_PASSWORD_REASONS.includes(reason)) {
+        return "Wrong password, try again.";
+    }
+    if (NOT_FOUND_REASONS.includes(reason)) {
+        return "Network not found, check the name and that it is in range.";
+    }
+    if (UNSUPPORTED_SECURITY_REASONS.includes(reason)) {
+        return "The network must use WPA2 or WPA3.";
+    }
+    return `Could not connect (reason ${reason}).`;
+}
+
+function setBusy(busy) {
+    for (const element of form.elements) {
+        element.disabled = busy;
+    }
+}
+
+/* The device's access point can drop for a moment while it moves to the router's
+ * channel, so failed requests are retried until the device reports a result */
+async function pollStatus() {
+    let status;
+    try {
+        const response = await fetch("/api/wifi/status", { cache: "no-store" });
+        status = await response.json();
+    } catch {
+        setTimeout(pollStatus, POLL_INTERVAL_MS);
+        return;
+    }
+
+    if (status.state === "connected") {
+        statusText.textContent = "Connected! You can switch back to your own WiFi.";
+    } else if (status.state === "failed") {
+        statusText.textContent = failureMessage(status.reason);
+        setBusy(false);
+    } else {
+        setTimeout(pollStatus, POLL_INTERVAL_MS);
+    }
+}
+
+form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const data = new FormData(form);
+    setBusy(true);
+    statusText.textContent = "Connecting...";
+
+    try {
+        const response = await fetch("/api/wifi/connect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ssid: data.get("ssid"), pass: data.get("pass") }),
+        });
+
+        if (!response.ok) {
+            statusText.textContent = await response.text();
+            setBusy(false);
+            return;
+        }
+    } catch {
+        /* the AP may already have switched channel, the status poll picks it up */
+    }
+
+    pollStatus();
+});

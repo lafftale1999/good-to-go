@@ -14,7 +14,9 @@
 #include "gtg_ntp.h"
 #include "gtg_https_server.h"
 #include "gtg_mdns.h"
-#include "credentials.h"
+
+/* time the softAP stays up after the station has connected */
+#define AP_SHUTDOWN_DELAY_MS 30000
 
 static const char *TAG = "main";
 
@@ -33,25 +35,26 @@ void app_main(void)
 
     wifi_ap_meta_t ap_cred;
     wifi_softap_init(&ap_cred);
+    ESP_ERROR_CHECK(wifi_station_init());
 
     ESP_ERROR_CHECK(gtg_mdns_init());
     ESP_ERROR_CHECK(gtg_https_server_init());
-    /* vTaskDelay(pdMS_TO_TICKS(60000));
 
+    ESP_ERROR_CHECK(wifi_softap_wait_for_client(pdMS_TO_TICKS(30000)));
+
+    /* the user enters the network credentials at goodtogo.local, which connects the station */
+    ESP_ERROR_CHECK(wifi_station_wait_connected(portMAX_DELAY));
+
+    /* give the web page time to show the result before the AP disappears */
+    vTaskDelay(pdMS_TO_TICKS(AP_SHUTDOWN_DELAY_MS));
     wifi_softap_deinit();
 
-    vTaskDelay(pdMS_TO_TICKS(1000)); */
+    ESP_ERROR_CHECK(gtg_ntp_init());
 
-    /* if (wifi_station_init(WIFI_SSID, WIFI_PASS) == ESP_OK) {
-        ESP_ERROR_CHECK(gtg_ntp_init());
-
-        if (gtg_ntp_wait_for_sync(30000) == ESP_OK) {
-            char time_str[32];
-            if (gtg_ntp_get_local_time_str(time_str, sizeof(time_str)) == ESP_OK) {
-                ESP_LOGI(TAG, "Swedish time: %s", time_str);
-            }
+    if (gtg_ntp_wait_for_sync(30000) == ESP_OK) {
+        char time_str[32];
+        if (gtg_ntp_get_local_time_str(time_str, sizeof(time_str)) == ESP_OK) {
+            ESP_LOGI(TAG, "Swedish time: %s", time_str);
         }
-
-        ESP_ERROR_CHECK(gtg_https_server_init());
-    } */
+    }
 }

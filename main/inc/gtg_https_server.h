@@ -13,6 +13,10 @@
  * Static files are served from the "www" LittleFS partition, built from the
  * web/ directory. "/" serves index.html.
  *
+ * WiFi configuration API, see gtg_wifi_station.h:
+ *  - POST /api/wifi/connect {"ssid": "...", "pass": "..."} starts connecting the station
+ *  - GET  /api/wifi/status  returns {"state": "idle|connecting|connected|failed", "reason": n}
+ *
  * The network interface must be up, e.g. through wifi_softap_init() or
  * wifi_station_init().
  *

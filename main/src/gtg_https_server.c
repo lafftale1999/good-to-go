@@ -9,6 +9,9 @@
 #include "esp_check.h"
 #include "esp_https_server.h"
 #include "esp_littlefs.h"
+#include "cJSON.h"
+
+#include "gtg_wifi_station.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -16,6 +19,7 @@
 #define WWW_GZIP_SUFFIX       ".gz"
 
 #define FILE_CHUNK_SIZE       1024
+#define API_BODY_MAX_LEN      256
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
 
 static const char *TAG = "https server";
@@ -134,6 +138,126 @@ static esp_err_t static_file_get_handler(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static esp_err_t send_json(httpd_req_t *req, const char *status, cJSON *json)
+{
+    char *body = cJSON_PrintUnformatted(json);
+    if (body == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_sendstr(req, body);
+
+    cJSON_free(body);
+    return err;
+}
+
+static const char *station_state_name(wifi_station_state_t state)
+{
+    switch (state) {
+    case WIFI_STATION_CONNECTING: return "connecting";
+    case WIFI_STATION_CONNECTED:  return "connected";
+    case WIFI_STATION_FAILED:     return "failed";
+    default:                      return "idle";
+    }
+}
+
+/* Responds with {"state": "idle|connecting|connected|failed", "reason": <wifi_err_reason_t>} */
+static esp_err_t send_wifi_status(httpd_req_t *req, const char *status)
+{
+    uint8_t reason;
+    wifi_station_state_t state = wifi_station_get_state(&reason);
+
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL
+        || cJSON_AddStringToObject(json, "state", station_state_name(state)) == NULL
+        || cJSON_AddNumberToObject(json, "reason", reason) == NULL) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, status, json);
+    cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t wifi_status_get_handler(httpd_req_t *req)
+{
+    return send_wifi_status(req, "200 OK");
+}
+
+/* Expects {"ssid": "...", "pass": "..."} and starts connecting without waiting for the
+ * result, as the softAP can drop for a moment when it moves to the router's channel.
+ * The result is polled through /api/wifi/status */
+static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
+{
+    char body[API_BODY_MAX_LEN + 1];
+
+    if (req->content_len == 0 || req->content_len > API_BODY_MAX_LEN) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
+    }
+
+    size_t received = 0;
+    while (received < req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (ret <= 0) {
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+    body[received] = '\0';
+
+    cJSON *json = cJSON_Parse(body);
+
+    /* the body contains the password */
+    memset(body, 0, sizeof(body));
+
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    }
+
+    const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "ssid"));
+    char *pass = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "pass"));
+
+    esp_err_t err = wifi_station_connect(ssid, pass);
+
+    if (pass != NULL) {
+        memset(pass, 0, strlen(pass));
+    }
+    cJSON_Delete(json);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID must be 1-32 and password 8-63 characters");
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Already connecting");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to connect");
+    }
+
+    return send_wifi_status(req, "202 Accepted");
+}
+
+static const httpd_uri_t api_uris[] = {
+    {
+        .uri       = "/api/wifi/status",
+        .method    = HTTP_GET,
+        .handler   = wifi_status_get_handler,
+    },
+    {
+        .uri       = "/api/wifi/connect",
+        .method    = HTTP_POST,
+        .handler   = wifi_connect_post_handler,
+    },
+};
+
 /* Must stay registered last. URI handlers are matched in registration order,
  * so register API endpoints before this catch-all */
 static const httpd_uri_t static_file_uri = {
@@ -197,7 +321,12 @@ esp_err_t gtg_https_server_init(void)
         return err;
     }
 
-    err = httpd_register_uri_handler(s_server, &static_file_uri);
+    for (size_t i = 0; i < sizeof(api_uris) / sizeof(api_uris[0]) && err == ESP_OK; i++) {
+        err = httpd_register_uri_handler(s_server, &api_uris[i]);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &static_file_uri);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to register URI handlers");
         gtg_https_server_deinit();
