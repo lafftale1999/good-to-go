@@ -2,6 +2,8 @@
 #define GTG_WIFI_STATION_H_
 
 #include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "esp_err.h"
 
@@ -11,6 +13,12 @@ typedef enum {
     WIFI_STATION_CONNECTED,     /*!< connected and got an IP address */
     WIFI_STATION_FAILED,        /*!< gave up after the maximum number of retries */
 } wifi_station_state_t;
+
+typedef struct {
+    char ssid[33];              /*!< NUL terminated SSID */
+    int8_t rssi;                /*!< signal strength in dBm, higher is stronger */
+    bool password_protected;    /*!< false for open and OWE networks */
+} wifi_station_scan_result_t;
 
 /**
  * \brief Enables the station interface without connecting to a network
@@ -48,6 +56,26 @@ esp_err_t wifi_station_init(void);
  * \return other                 error from the underlying esp_wifi calls
  */
 esp_err_t wifi_station_connect(const char *ssid, const char *pass);
+
+/**
+ * \brief Scans for nearby networks and blocks until the scan is done
+ *
+ * Takes around 2 seconds. A running softAP has to leave its channel during the
+ * scan, so its clients see a short pause in traffic.
+ *
+ * Hidden networks are left out and a network seen from several access points
+ * is only listed once, with its strongest signal.
+ *
+ * \param *results     filled with the strongest networks, strongest first
+ * \param max_results  number of entries results can hold
+ * \param *count       set to the number of entries written
+ *
+ * \return ESP_OK                scan done, count can be 0
+ * \return ESP_ERR_INVALID_ARG   results or count is NULL
+ * \return ESP_ERR_INVALID_STATE station is not initialized or is connecting
+ * \return other                 error from the underlying esp_wifi calls
+ */
+esp_err_t wifi_station_scan(wifi_station_scan_result_t *results, size_t max_results, size_t *count);
 
 /**
  * \brief Returns the connection state

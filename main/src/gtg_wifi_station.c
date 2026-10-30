@@ -208,6 +208,82 @@ esp_err_t wifi_station_connect(const char *ssid, const char *pass)
     return ESP_OK;
 }
 
+/* Keeps results sorted by RSSI with one entry per SSID, the weakest entry drops out when full */
+static void insert_scan_result(wifi_station_scan_result_t *results, size_t max_results,
+                               size_t *count, const wifi_ap_record_t *record)
+{
+    const char *ssid = (const char *)record->ssid;
+    if (ssid[0] == '\0') {
+        return;
+    }
+
+    for (size_t i = 0; i < *count; i++) {
+        if (strncmp(results[i].ssid, ssid, sizeof(results[i].ssid)) == 0) {
+            if (results[i].rssi >= record->rssi) {
+                return;
+            }
+            /* the stronger one is inserted below */
+            memmove(&results[i], &results[i + 1], (*count - i - 1) * sizeof(*results));
+            (*count)--;
+            break;
+        }
+    }
+
+    size_t pos = 0;
+    while (pos < *count && results[pos].rssi >= record->rssi) {
+        pos++;
+    }
+    if (pos >= max_results) {
+        return;
+    }
+
+    size_t moved = (*count < max_results ? *count : max_results - 1) - pos;
+    memmove(&results[pos + 1], &results[pos], moved * sizeof(*results));
+    if (*count < max_results) {
+        (*count)++;
+    }
+
+    strlcpy(results[pos].ssid, ssid, sizeof(results[pos].ssid));
+    results[pos].rssi = record->rssi;
+    results[pos].password_protected = record->authmode != WIFI_AUTH_OPEN
+                                      && record->authmode != WIFI_AUTH_OWE;
+}
+
+esp_err_t wifi_station_scan(wifi_station_scan_result_t *results, size_t max_results, size_t *count)
+{
+    if (results == NULL || count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *count = 0;
+
+    if (!s_sta_enabled) {
+        ESP_LOGE(TAG, "not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* the driver refuses to scan while connecting */
+    if (s_state == WIFI_STATION_CONNECTING) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_wifi_scan_start(NULL, true);
+    if (err == ESP_ERR_WIFI_STATE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "esp_wifi_scan_start failed");
+
+    /* fetching one record at a time frees each one, avoiding a buffer for the whole list */
+    wifi_ap_record_t record;
+    while (esp_wifi_scan_get_ap_record(&record) == ESP_OK) {
+        insert_scan_result(results, max_results, count, &record);
+    }
+    esp_wifi_clear_ap_list();
+
+    ESP_LOGI(TAG, "scan found %u networks", (unsigned)*count);
+
+    return ESP_OK;
+}
+
 wifi_station_state_t wifi_station_get_state(uint8_t *reason)
 {
     if (reason != NULL) {

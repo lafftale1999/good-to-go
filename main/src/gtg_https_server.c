@@ -20,6 +20,7 @@
 
 #define FILE_CHUNK_SIZE       1024
 #define API_BODY_MAX_LEN      256
+#define WIFI_SCAN_MAX_RESULTS 10
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
 
 static const char *TAG = "https server";
@@ -245,11 +246,60 @@ static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
     return send_wifi_status(req, "202 Accepted");
 }
 
+/* Responds with [{"ssid": "...", "rssi": -52, "secure": true}, ...], strongest first.
+ * Blocks for the length of the scan, during which the softAP pauses */
+static esp_err_t wifi_scan_get_handler(httpd_req_t *req)
+{
+    wifi_station_scan_result_t results[WIFI_SCAN_MAX_RESULTS];
+    size_t count;
+
+    esp_err_t err = wifi_station_scan(results, WIFI_SCAN_MAX_RESULTS, &count);
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Busy connecting, try again shortly");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Scan failed");
+    }
+
+    cJSON *json = cJSON_CreateArray();
+    for (size_t i = 0; json != NULL && i < count; i++) {
+        cJSON *network = cJSON_CreateObject();
+
+        /* once added, the object is freed together with the array */
+        bool ok = network != NULL && cJSON_AddItemToArray(json, network);
+        if (!ok) {
+            cJSON_Delete(network);
+        }
+
+        ok = ok
+            && cJSON_AddStringToObject(network, "ssid", results[i].ssid) != NULL
+            && cJSON_AddNumberToObject(network, "rssi", results[i].rssi) != NULL
+            && cJSON_AddBoolToObject(network, "secure", results[i].password_protected) != NULL;
+        if (!ok) {
+            cJSON_Delete(json);
+            json = NULL;
+        }
+    }
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
 static const httpd_uri_t api_uris[] = {
     {
         .uri       = "/api/wifi/status",
         .method    = HTTP_GET,
         .handler   = wifi_status_get_handler,
+    },
+    {
+        .uri       = "/api/wifi/scan",
+        .method    = HTTP_GET,
+        .handler   = wifi_scan_get_handler,
     },
     {
         .uri       = "/api/wifi/connect",
