@@ -1,8 +1,10 @@
 #include "gtg_soft_access_point.h"
+#include "gtg_wifi.h"
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -18,6 +20,9 @@
 
 #define WIFI_AP_SSID_START         "GTG"
 
+/* Set while at least one client is connected, wifi_softap_wait_for_client() waits for it */
+#define AP_CLIENT_CONNECTED_BIT    BIT0
+
 #if CONFIG_ESP_GTK_REKEYING_ENABLE
 #define GTK_REKEY_INTERVAL CONFIG_ESP_GTK_REKEY_INTERVAL
 #else
@@ -28,6 +33,8 @@ static const char *TAG = "wifi softAP";
 
 static esp_netif_t *s_ap_netif = NULL;
 static esp_event_handler_instance_t s_wifi_event_instance = NULL;
+static EventGroupHandle_t s_ap_event_group = NULL;
+static int s_client_count = 0;
 
 static void generate_credentials(wifi_ap_meta_t *wifi_ap_meta) {
     char *pos;
@@ -67,19 +74,27 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
         ESP_LOGI(TAG, "station "MACSTR" join, AID=%d",
                  MAC2STR(event->mac), event->aid);
+        s_client_count++;
+        xEventGroupSetBits(s_ap_event_group, AP_CLIENT_CONNECTED_BIT);
     } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
         ESP_LOGI(TAG, "station "MACSTR" leave, AID=%d, reason=%d",
                  MAC2STR(event->mac), event->aid, event->reason);
+        if (s_client_count > 0 && --s_client_count == 0) {
+            xEventGroupClearBits(s_ap_event_group, AP_CLIENT_CONNECTED_BIT);
+        }
     }
 }
 
 void wifi_softap_init(wifi_ap_meta_t *wifi_ap_meta)
 {
-    s_ap_netif = esp_netif_create_default_wifi_ap();
+    s_ap_event_group = xEventGroupCreate();
+    if (s_ap_event_group == NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    s_client_count = 0;
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    s_ap_netif = esp_netif_create_default_wifi_ap();
 
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
                                                         ESP_EVENT_ANY_ID,
@@ -121,24 +136,40 @@ void wifi_softap_init(wifi_ap_meta_t *wifi_ap_meta)
         wifi_config.ap.authmode = WIFI_AUTH_OPEN;
     }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(gtg_wifi_enable(WIFI_IF_AP, &wifi_config));
 
     ESP_LOGI(TAG, "wifi_softap_init finished. SSID:%s password:%s channel:%d",
              wifi_ap_meta->ssid, wifi_ap_meta->pass, ESP_WIFI_CHANNEL);
 }
 
 void wifi_softap_deinit(void) {
-    ESP_ERROR_CHECK(esp_wifi_stop());
+    /* only the AP is stopped, a running station stays connected */
+    ESP_ERROR_CHECK(gtg_wifi_disable(WIFI_IF_AP));
 
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,
                                                           ESP_EVENT_ANY_ID,
                                                           s_wifi_event_instance));
     s_wifi_event_instance = NULL;
 
-    ESP_ERROR_CHECK(esp_wifi_deinit());
-
     esp_netif_destroy_default_wifi(s_ap_netif);
     s_ap_netif = NULL;
+
+    vEventGroupDelete(s_ap_event_group);
+    s_ap_event_group = NULL;
+    s_client_count = 0;
+}
+
+esp_err_t wifi_softap_wait_for_client(TickType_t ticks)
+{
+    if (s_ap_event_group == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_ap_event_group,
+            AP_CLIENT_CONNECTED_BIT,
+            pdFALSE,
+            pdTRUE,
+            ticks);
+
+    return (bits & AP_CLIENT_CONNECTED_BIT) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
