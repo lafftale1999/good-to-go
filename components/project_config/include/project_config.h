@@ -17,4 +17,8 @@
 #define I2C_MASTER_TIMEOUT_MS       1000
 #define I2C_DEVICE_ADDRESS_LEN      I2C_ADDR_BIT_LEN_7
 
+// BUTTON BETWEEN 3V3 AND THE GPIO, READ WITH THE INTERNAL PULL-DOWN. AN RTC GPIO, SO IT CAN WAKE FROM DEEP SLEEP LATER.
+#define BUTTON_GPIO                 GPIO_NUM_4                  /*!< GPIO number used for the button */
+#define BUTTON_ACTIVE_LEVEL         1                           /*!< level read while the button is pushed */
+
 #endif

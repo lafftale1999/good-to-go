@@ -19,6 +19,7 @@
 #include "gtg_dev_config.h"
 #include "gtg_lcd.h"
 #include "gtg_events.h"
+#include "gtg_button.h"
 
 /* the station retries 5 times, which ends well within this */
 #define BOOT_WIFI_TIMEOUT_MS    60000
@@ -42,8 +43,9 @@ static void log_event(const gtg_event_t *event)
         ESP_LOGI(TAG, "event: %s, %s", gtg_event_type_name(event->type),
                  event->api_key.which == GTG_API_KEY_TRAFIKLAB ? "Trafiklab" : "Google");
         break;
-    case GTG_EV_BUTTON_PRESSED:
-    case GTG_EV_BUTTON_HOLD:
+    case GTG_EV_BUTTON_CLICKED:
+    case GTG_EV_BUTTON_SHORT_HOLD:
+    case GTG_EV_BUTTON_LONG_HOLD:
         ESP_LOGI(TAG, "event: %s, button %u", gtg_event_type_name(event->type), event->button.id);
         break;
     default:
@@ -140,6 +142,11 @@ void app_main(void)
     ESP_ERROR_CHECK(gtg_events_init());
     if (xTaskCreate(event_task, "gtg events", EVENT_TASK_STACK_SIZE, NULL, EVENT_TASK_PRIORITY, NULL) != pdPASS) {
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+
+    /* the device works without the button, so a failure is only logged */
+    if (gtg_button_init() != ESP_OK) {
+        ESP_LOGW(TAG, "button unavailable");
     }
 
     /* the device works without the screen, so a missing one is only logged */

@@ -13,6 +13,7 @@ idf_component_register(
         "src/gtg_dev_config.c"
         "src/gtg_lcd.c"
         "src/gtg_events.c"
+        "src/gtg_button.c"
         "lib/cJSON/cJSON.c"
 
     PRIV_REQUIRES
@@ -25,6 +26,8 @@ idf_component_register(
         lwip
         nvs_flash
         esp_timer
+        esp_driver_gpio
+        project_config
         lcd_screen
 
     EMBED_TXTFILES
