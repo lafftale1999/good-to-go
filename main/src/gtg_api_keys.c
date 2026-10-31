@@ -13,6 +13,7 @@
 #include "cJSON.h"
 
 #include "gtg_dev_config.h"
+#include "gtg_events.h"
 
 #define API_REQUEST_TIMEOUT_MS  10000
 #define API_URL_MAX_LEN         256
@@ -81,7 +82,8 @@ static esp_err_t check_trafiklab_key(const char *key)
     if (status >= 200 && status < 300) {
         return ESP_OK;
     }
-    if (status >= 400 && status < 500) {
+    /* other client errors, e.g. 429 for too many requests, say nothing about the key */
+    if (status == 401 || status == 403) {
         return ESP_ERR_NOT_ALLOWED;
     }
     return ESP_ERR_INVALID_RESPONSE;
@@ -90,7 +92,7 @@ static esp_err_t check_trafiklab_key(const char *key)
 /* The Geocoding API responds with 200 also for rejected keys, the result is in "status" */
 static esp_err_t parse_google_response(int status, const char *body)
 {
-    if (status >= 400 && status < 500) {
+    if (status == 401 || status == 403) {
         return ESP_ERR_NOT_ALLOWED;
     }
     if (status != 200) {
@@ -205,6 +207,11 @@ esp_err_t gtg_api_keys_set(gtg_api_key_t which, const char *key)
     esp_err_t err = service->check(key);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "%s key not accepted: %s", service->name, esp_err_to_name(err));
+
+        /* only an answer from the service rejects the key, not e.g. a lost connection */
+        if (err == ESP_ERR_NOT_ALLOWED) {
+            gtg_events_post_key_rejected(which);
+        }
         return err;
     }
 

@@ -12,6 +12,7 @@ idf_component_register(
         "src/gtg_departures.c"
         "src/gtg_dev_config.c"
         "src/gtg_lcd.c"
+        "src/gtg_events.c"
         "lib/cJSON/cJSON.c"
 
     PRIV_REQUIRES

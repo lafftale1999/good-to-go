@@ -12,6 +12,7 @@
 #include "esp_check.h"
 
 #include "gtg_dev_config.h"
+#include "gtg_events.h"
 
 #define WIFI_STA_MAXIMUM_RETRY     5
 
@@ -40,6 +41,18 @@ static bool s_sta_enabled = false;
 static volatile wifi_station_state_t s_state = WIFI_STATION_IDLE;
 static volatile uint8_t s_last_reason = 0;
 static int s_retry_num = 0;
+
+static void post_connection_changed(bool connected, uint8_t reason)
+{
+    gtg_event_t event = {
+        .type = GTG_EV_CONNECTION_CHANGED,
+        .wifi = {
+            .connected = connected,
+            .reason = reason,
+        },
+    };
+    gtg_events_post(&event);
+}
 
 /* Stores the credentials the driver connected with in the device configuration, so only
  * credentials that work end up there */
@@ -72,8 +85,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*) event_data;
         ESP_LOGW(TAG, "disconnected from AP, reason=%d", event->reason);
 
-        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        /* the bits from before clearing tell a lost connection from a failed retry */
+        EventBits_t bits = xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         gtg_dev_config_set_flag(GTG_DEV_FLAG_CONNECTED, false);
+
+        if (bits & WIFI_CONNECTED_BIT) {
+            post_connection_changed(false, event->reason);
+        }
 
         /* disconnects we asked for ourselves, or after giving up, are not retried */
         if (s_state == WIFI_STATION_IDLE || s_state == WIFI_STATION_FAILED) {
@@ -101,9 +119,16 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         /* before the state changes, so the configuration has them once the connection is reported */
         store_connected_credentials();
 
+        /* a new address while connected, e.g. a DHCP renewal, isn't a new connection */
+        bool was_connected = (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
+
         s_state = WIFI_STATION_CONNECTED;
         gtg_dev_config_set_flag(GTG_DEV_FLAG_CONNECTED, true);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        if (!was_connected) {
+            post_connection_changed(true, 0);
+        }
     }
 }
 
