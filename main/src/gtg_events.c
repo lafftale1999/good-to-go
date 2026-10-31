@@ -66,8 +66,9 @@ const char *gtg_event_type_name(gtg_event_type_t type)
     switch (type) {
     case GTG_EV_CONNECTION_CHANGED: return "connection changed";
     case GTG_EV_API_KEY_REJECTED:   return "API key rejected";
-    case GTG_EV_BUTTON_PRESSED:     return "button pressed";
-    case GTG_EV_BUTTON_HOLD:        return "button hold";
+    case GTG_EV_BUTTON_CLICKED:     return "button clicked";
+    case GTG_EV_BUTTON_SHORT_HOLD:  return "button short hold";
+    case GTG_EV_BUTTON_LONG_HOLD:   return "button long hold";
     default:                        return "unknown";
     }
 }

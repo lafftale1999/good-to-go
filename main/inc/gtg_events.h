@@ -18,8 +18,9 @@
 typedef enum {
     GTG_EV_CONNECTION_CHANGED,  /*!< the station connected or lost its connection, see wifi */
     GTG_EV_API_KEY_REJECTED,    /*!< a service rejected a key, at verification or in use, see api_key */
-    GTG_EV_BUTTON_PRESSED,      /*!< a button was pressed, see button */
-    GTG_EV_BUTTON_HOLD,         /*!< a button was held, see button */
+    GTG_EV_BUTTON_CLICKED,      /*!< a button was released within the short hold time, see button */
+    GTG_EV_BUTTON_SHORT_HOLD,   /*!< a button was released after the short hold time, see button */
+    GTG_EV_BUTTON_LONG_HOLD,    /*!< a button has been held for the long hold time, still pushed, see button */
 } gtg_event_type_t;
 
 typedef struct {
@@ -36,7 +37,7 @@ typedef struct {
 
         struct {
             uint8_t id;
-        } button;               /*!< GTG_EV_BUTTON_PRESSED and GTG_EV_BUTTON_HOLD */
+        } button;               /*!< GTG_EV_BUTTON_CLICKED, _SHORT_HOLD and _LONG_HOLD */
     };
 } gtg_event_t;
 
