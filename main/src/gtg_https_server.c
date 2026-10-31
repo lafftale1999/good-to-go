@@ -202,6 +202,27 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
     return send_wifi_status(req, "200 OK");
 }
 
+/* Responds with the runtime flags of the device configuration,
+ * {"connected": bool, "time_synced": bool, "keys_verified": bool, "has_departures": bool} */
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    uint32_t flags = gtg_dev_config_get_flags();
+
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL
+        || cJSON_AddBoolToObject(json, "connected", flags & GTG_DEV_FLAG_CONNECTED) == NULL
+        || cJSON_AddBoolToObject(json, "time_synced", flags & GTG_DEV_FLAG_TIME_SYNCED) == NULL
+        || cJSON_AddBoolToObject(json, "keys_verified", flags & GTG_DEV_FLAG_KEYS_VERIFIED) == NULL
+        || cJSON_AddBoolToObject(json, "has_departures", flags & GTG_DEV_FLAG_HAS_DEPARTURES) == NULL) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
 /* Receives and parses a JSON body. On NULL the error response has been sent and
  * *err holds the handler's return value */
 static cJSON *receive_json(httpd_req_t *req, esp_err_t *err)
@@ -804,6 +825,11 @@ static esp_err_t factory_reset_post_handler(httpd_req_t *req)
 }
 
 static const httpd_uri_t api_uris[] = {
+    {
+        .uri       = "/api/status",
+        .method    = HTTP_GET,
+        .handler   = status_get_handler,
+    },
     {
         .uri       = "/api/wifi/status",
         .method    = HTTP_GET,

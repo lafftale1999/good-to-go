@@ -44,6 +44,57 @@ static char *api_key_field(gtg_api_key_t which)
     }
 }
 
+static const char *flag_name(gtg_dev_flag_t flag)
+{
+    switch (flag) {
+    case GTG_DEV_FLAG_CONNECTED:      return "connected";
+    case GTG_DEV_FLAG_TIME_SYNCED:    return "time synced";
+    case GTG_DEV_FLAG_KEYS_VERIFIED:  return "keys verified";
+    case GTG_DEV_FLAG_HAS_DEPARTURES: return "has departures";
+    default:                          return "unknown";
+    }
+}
+
+/* Called with the lock held */
+static void set_flag_locked(gtg_dev_flag_t flag, bool on)
+{
+    uint32_t flags = on ? s_config.flags | flag : s_config.flags & ~(uint32_t)flag;
+    if (flags != s_config.flags) {
+        s_config.flags = flags;
+        ESP_LOGI(TAG, "flag %s: %s", flag_name(flag), on ? "on" : "off");
+    }
+}
+
+/* Called with the lock held, after realtime_targets changed */
+static void update_departures_flag_locked(void)
+{
+    set_flag_locked(GTG_DEV_FLAG_HAS_DEPARTURES, s_config.realtime_targets.len > 0);
+}
+
+void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on)
+{
+    if (s_mutex == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    set_flag_locked(flag, on);
+    xSemaphoreGive(s_mutex);
+}
+
+uint32_t gtg_dev_config_get_flags(void)
+{
+    if (s_mutex == NULL) {
+        return 0;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    uint32_t flags = s_config.flags;
+    xSemaphoreGive(s_mutex);
+
+    return flags;
+}
+
 /* Stamps the change and saves the configuration. A failed save is only logged, the change
  * stays in RAM and the next change saves again. Called with the lock held */
 static void mark_changed(void)
@@ -127,6 +178,24 @@ esp_err_t gtg_dev_config_set_wifi(const char *ssid, const char *pass)
     }
 
     return ESP_OK;
+}
+
+esp_err_t gtg_dev_config_get_wifi(char *ssid, char *pass)
+{
+    if (ssid == NULL || pass == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    strlcpy(ssid, s_config.wifi_ssid, GTG_DEV_CONFIG_SSID_MAX_LEN + 1);
+    strlcpy(pass, s_config.wifi_pass, GTG_DEV_CONFIG_PASS_MAX_LEN + 1);
+    xSemaphoreGive(s_mutex);
+
+    return ssid[0] != '\0' ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t gtg_dev_config_set_api_key(gtg_api_key_t which, const char *key)
@@ -255,6 +324,7 @@ esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *co
         err = ESP_ERR_INVALID_SIZE;
     } else {
         targets->list[targets->len++] = *target;
+        update_departures_flag_locked();
         mark_changed();
     }
 
@@ -300,6 +370,7 @@ esp_err_t gtg_dev_config_remove_target(const char *stop_id, const gtg_departure_
                 (targets->len - index - 1) * sizeof(targets->list[0]));
         targets->len--;
         memset(&targets->list[targets->len], 0, sizeof(targets->list[0]));
+        update_departures_flag_locked();
         mark_changed();
     }
 
@@ -571,6 +642,7 @@ esp_err_t gtg_dev_config_load(void)
         memset(targets->list, 0, targets->size * sizeof(targets->list[0]));
         memcpy(targets->list, loaded.realtime_targets.list, loaded.realtime_targets.len * sizeof(targets->list[0]));
         targets->len = loaded.realtime_targets.len;
+        update_departures_flag_locked();
 
         xSemaphoreGive(s_mutex);
 
@@ -582,60 +654,6 @@ esp_err_t gtg_dev_config_load(void)
 
     stored_copy_free(&loaded);
     return err;
-}
-
-/* "set (N chars)" or "not set", the value itself is never logged */
-static const char *secret_state(const char *value, char *buf, size_t buf_size)
-{
-    if (value[0] == '\0') {
-        return "not set";
-    }
-    snprintf(buf, buf_size, "set (%u chars)", (unsigned)strlen(value));
-    return buf;
-}
-
-void gtg_dev_config_log_stored(void)
-{
-    gtg_dev_config_t stored;
-    esp_err_t err = stored_copy_create(&stored);
-    if (err == ESP_OK) {
-        err = read_stored(&stored);
-    }
-
-    if (err == ESP_ERR_NOT_FOUND) {
-        ESP_LOGI(TAG, "stored configuration: none");
-    } else if (err != ESP_OK) {
-        ESP_LOGW(TAG, "stored configuration: unreadable, %s", esp_err_to_name(err));
-    } else {
-        char buf[24];
-
-        /* the timezone is set later by NTP, so the time is shown in UTC */
-        char changed[32] = "unknown";
-        if (stored.last_changed != 0) {
-            struct tm tm;
-            gmtime_r(&stored.last_changed, &tm);
-            strftime(changed, sizeof(changed), "%Y-%m-%d %H:%M:%S UTC", &tm);
-        }
-
-        ESP_LOGI(TAG, "stored configuration:");
-        ESP_LOGI(TAG, "  last changed:  %s", changed);
-        ESP_LOGI(TAG, "  WiFi SSID:     %s", stored.wifi_ssid[0] != '\0' ? stored.wifi_ssid : "not set");
-        ESP_LOGI(TAG, "  WiFi password: %s", secret_state(stored.wifi_pass, buf, sizeof(buf)));
-        ESP_LOGI(TAG, "  Trafiklab key: %s", secret_state(stored.trafiklab_api_key, buf, sizeof(buf)));
-        ESP_LOGI(TAG, "  Google key:    %s", secret_state(stored.google_maps_api_key, buf, sizeof(buf)));
-        ESP_LOGI(TAG, "  targets:       %u of %d",
-                 (unsigned)stored.realtime_targets.len, GTG_DEV_CONFIG_MAX_TARGETS);
-
-        for (size_t i = 0; i < stored.realtime_targets.len; i++) {
-            const trafiklab_target_t *target = &stored.realtime_targets.list[i];
-            ESP_LOGI(TAG, "    %u. %s %s %s from %s%s%s (%s)", (unsigned)(i + 1),
-                     target->departure.mode, target->departure.line, target->departure.destination,
-                     target->stop.name, target->stop.town[0] != '\0' ? ", " : "", target->stop.town,
-                     target->stop.id);
-        }
-    }
-
-    stored_copy_free(&stored);
 }
 
 esp_err_t gtg_dev_config_factory_reset(void)
@@ -657,13 +675,17 @@ esp_err_t gtg_dev_config_factory_reset(void)
         nvs_close(nvs);
     }
 
-    /* the runtime configuration is cleared either way, the room for the targets stays */
+    /* the runtime configuration is cleared either way, the room for the targets stays and so do
+     * the flags of the other modules, which only change on the restart that follows */
     trafiklab_target_list_t targets = s_config.realtime_targets;
     memset(targets.list, 0, targets.size * sizeof(targets.list[0]));
     targets.len = 0;
+    uint32_t flags = s_config.flags;
 
     memset(&s_config, 0, sizeof(s_config));
     s_config.realtime_targets = targets;
+    s_config.flags = flags;
+    update_departures_flag_locked();
 
     xSemaphoreGive(s_mutex);
 

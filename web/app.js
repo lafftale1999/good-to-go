@@ -205,16 +205,28 @@ function showKeysVerified(keys) {
     }
 }
 
-async function showKeysStep() {
-    wifiStep.hidden = true;
-    keysStep.hidden = false;
-    statusText.textContent = "";
+/* After the WiFi step the device verifies its stored keys by itself, so the key step checks
+ * back until both are verified */
+const KEYS_POLL_INTERVAL_MS = 3000;
+let keysPoll = null;
 
+async function refreshKeys() {
     try {
         const response = await fetch("/api/keys/status", { cache: "no-store" });
         showKeysVerified(await response.json());
     } catch {
         /* nothing verified is shown, the keys can still be added */
+    }
+}
+
+function showKeysStep() {
+    wifiStep.hidden = true;
+    keysStep.hidden = false;
+    statusText.textContent = "";
+
+    refreshKeys();
+    if (keysPoll === null) {
+        keysPoll = setInterval(refreshKeys, KEYS_POLL_INTERVAL_MS);
     }
 }
 
@@ -250,6 +262,16 @@ for (const keyForm of keyForms) {
 }
 
 function showStopsStep() {
+    if (keysPoll !== null) {
+        clearInterval(keysPoll);
+        keysPoll = null;
+    }
+
+    /* the step can be shown straight after loading, when the device was already configured */
+    if (!stopsStep.hidden) {
+        return;
+    }
+    wifiStep.hidden = true;
     keysStep.hidden = true;
     stopsStep.hidden = false;
     statusText.textContent = "";
@@ -550,12 +572,16 @@ stopForm.addEventListener("submit", async (event) => {
     }
 });
 
-/* a reload after the WiFi step continues with the keys, or the stops once the keys are verified */
+/* The device's flags decide the first step: WiFi when not connected, then the keys until they are
+ * verified, then the departures. Covers both a reload and a device configured from NVS at boot */
 (async () => {
     try {
-        const response = await fetch("/api/wifi/status", { cache: "no-store" });
+        const response = await fetch("/api/status", { cache: "no-store" });
         const status = await response.json();
-        if (status.state === "connected") {
+
+        if (status.connected && status.keys_verified) {
+            showStopsStep();
+        } else if (status.connected) {
             showKeysStep();
         }
     } catch {

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 #include "esp_err.h"
 
@@ -12,6 +13,17 @@
 #define GTG_DEV_CONFIG_SSID_MAX_LEN 32
 #define GTG_DEV_CONFIG_PASS_MAX_LEN 63
 #define GTG_DEV_CONFIG_MAX_TARGETS  8
+
+/**
+ * Runtime state of the device, one bit each in gtg_dev_config_t.flags. They are not saved,
+ * the modules that own each state keep them up to date while the device runs
+ */
+typedef enum {
+    GTG_DEV_FLAG_CONNECTED      = 1 << 0,   /*!< the station is connected with an IP address */
+    GTG_DEV_FLAG_TIME_SYNCED    = 1 << 1,   /*!< the clock has been set by NTP */
+    GTG_DEV_FLAG_KEYS_VERIFIED  = 1 << 2,   /*!< every API key has been verified this boot */
+    GTG_DEV_FLAG_HAS_DEPARTURES = 1 << 3,   /*!< realtime_targets holds at least one target */
+} gtg_dev_flag_t;
 
 /**
  * The runtime configuration of the device. The single instance is owned by this module and
@@ -33,6 +45,9 @@ typedef struct _gtg_dev_config_ {
 
     char                    trafiklab_api_key[GTG_API_KEY_MAX_LEN + 1];
     char                    google_maps_api_key[GTG_API_KEY_MAX_LEN + 1];
+
+    /* gtg_dev_flag_t bits, runtime only */
+    uint32_t                flags;
 } gtg_dev_config_t;
 
 /**
@@ -87,14 +102,6 @@ esp_err_t gtg_dev_config_save(void);
 esp_err_t gtg_dev_config_factory_reset(void);
 
 /**
- * \brief TEMPORARY: logs the configuration stored in NVS, for checking that it persists
- *
- * Reads it without loading it into the runtime configuration. The password and keys are only
- * logged as set or not set with their length. Remove once the boot flow loads the configuration.
- */
-void gtg_dev_config_log_stored(void);
-
-/**
  * \brief Stores the credentials of the WiFi network the station connected to
  *
  * last_changed is only updated when they differ from the stored ones.
@@ -107,6 +114,31 @@ void gtg_dev_config_log_stored(void);
  * \return ESP_ERR_INVALID_STATE not initialized
  */
 esp_err_t gtg_dev_config_set_wifi(const char *ssid, const char *pass);
+
+/**
+ * \brief Copies the stored WiFi credentials
+ *
+ * \param *ssid       receives the SSID, room for GTG_DEV_CONFIG_SSID_MAX_LEN + 1
+ * \param *pass       receives the password, room for GTG_DEV_CONFIG_PASS_MAX_LEN + 1
+ *
+ * \return ESP_OK                copied
+ * \return ESP_ERR_INVALID_ARG   NULL argument
+ * \return ESP_ERR_NOT_FOUND     no credentials are stored
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_dev_config_get_wifi(char *ssid, char *pass);
+
+/**
+ * \brief Sets or clears a runtime flag, a change is logged
+ *
+ * GTG_DEV_FLAG_HAS_DEPARTURES follows realtime_targets by itself.
+ */
+void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on);
+
+/**
+ * \brief Returns the gtg_dev_flag_t bits that are set
+ */
+uint32_t gtg_dev_config_get_flags(void);
 
 /**
  * \brief Stores a verified API key

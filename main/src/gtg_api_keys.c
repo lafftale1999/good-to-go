@@ -210,7 +210,10 @@ esp_err_t gtg_api_keys_set(gtg_api_key_t which, const char *key)
 
     ESP_RETURN_ON_ERROR(gtg_dev_config_set_api_key(which, key), TAG, "failed to store the %s key", service->name);
 
-    xEventGroupSetBits(s_event_group, BIT(which));
+    EventBits_t bits = xEventGroupSetBits(s_event_group, BIT(which));
+    if ((bits & ALL_KEYS_SET_BITS) == ALL_KEYS_SET_BITS) {
+        gtg_dev_config_set_flag(GTG_DEV_FLAG_KEYS_VERIFIED, true);
+    }
 
     ESP_LOGI(TAG, "%s key verified", service->name);
 

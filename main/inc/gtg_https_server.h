@@ -13,6 +13,9 @@
  * Static files are served from the "www" LittleFS partition, built from the
  * web/ directory. "/" serves index.html.
  *
+ * Device state, see gtg_dev_flag_t in gtg_dev_config.h. The page starts at the first step that isn't done:
+ *  - GET  /api/status returns {"connected": bool, "time_synced": bool, "keys_verified": bool, "has_departures": bool}
+ *
  * WiFi configuration API, see gtg_wifi_station.h:
  *  - POST /api/wifi/connect {"ssid": "...", "pass": "..."} starts connecting the station
  *  - GET  /api/wifi/status  returns {"state": "idle|connecting|connected|failed", "reason": n}
