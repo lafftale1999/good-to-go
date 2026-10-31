@@ -10,6 +10,8 @@
 #include "esp_check.h"
 #include "esp_https_server.h"
 #include "esp_littlefs.h"
+#include "esp_timer.h"
+#include "esp_system.h"
 #include "cJSON.h"
 
 #include "gtg_wifi_station.h"
@@ -28,6 +30,10 @@
 #define API_BODY_MAX_LEN      512
 #define WIFI_SCAN_MAX_RESULTS 10
 #define HTTPD_STACK_SIZE      16384
+
+/* lets the response reach the browser before the device restarts after a factory reset */
+#define FACTORY_RESET_RESTART_DELAY_US  (1000 * 1000)
+#define FACTORY_RESET_CONFIRM           "factory-reset"
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
 
 static const char *TAG = "https server";
@@ -744,6 +750,59 @@ static esp_err_t targets_delete_handler(httpd_req_t *req)
     return send_targets(req, "200 OK");
 }
 
+static void restart_cb(void *arg)
+{
+    esp_restart();
+}
+
+/* Expects {"confirm": "factory-reset"}, erases the stored configuration and restarts the device,
+ * which brings every module back to its first boot state. The confirmation guards against an
+ * accidental request, the server has no login */
+static esp_err_t factory_reset_post_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    const char *confirm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "confirm"));
+    bool confirmed = confirm != NULL && strcmp(confirm, FACTORY_RESET_CONFIRM) == 0;
+    cJSON_Delete(json);
+
+    if (!confirmed) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Confirm with {\"confirm\": \"" FACTORY_RESET_CONFIRM "\"}");
+    }
+
+    esp_timer_handle_t timer = NULL;
+    const esp_timer_create_args_t timer_args = {
+        .callback = restart_cb,
+        .name     = "factory reset",
+    };
+
+    /* the timer is made first, so the configuration isn't erased on a device that can't restart */
+    if (esp_timer_create(&timer_args, &timer) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not prepare the restart");
+    }
+
+    err = gtg_dev_config_factory_reset();
+    if (err != ESP_OK) {
+        esp_timer_delete(timer);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not erase the configuration");
+    }
+
+    httpd_resp_set_status(req, "202 Accepted");
+    err = httpd_resp_sendstr(req, "Factory reset done, the device restarts");
+
+    /* restarts also when the response couldn't be sent, the configuration is already gone */
+    if (esp_timer_start_once(timer, FACTORY_RESET_RESTART_DELAY_US) != ESP_OK) {
+        esp_restart();
+    }
+
+    return err;
+}
+
 static const httpd_uri_t api_uris[] = {
     {
         .uri       = "/api/wifi/status",
@@ -801,6 +860,11 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/targets",
         .method    = HTTP_DELETE,
         .handler   = targets_delete_handler,
+    },
+    {
+        .uri       = "/api/factory-reset",
+        .method    = HTTP_POST,
+        .handler   = factory_reset_post_handler,
     },
 };
 

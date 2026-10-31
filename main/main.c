@@ -35,6 +35,9 @@ void app_main(void)
     /* the station and the key verification store what the user configures here */
     ESP_ERROR_CHECK(gtg_dev_config_init());
 
+    /* TEMPORARY: shows what the last session saved, until the boot flow loads it */
+    gtg_dev_config_log_stored();
+
     wifi_ap_meta_t ap_cred;
     wifi_softap_init(&ap_cred);
     ESP_ERROR_CHECK(wifi_station_init());

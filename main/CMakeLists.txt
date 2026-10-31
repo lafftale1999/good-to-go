@@ -22,6 +22,7 @@ idf_component_register(
         esp_littlefs
         lwip
         nvs_flash
+        esp_timer
 
     EMBED_TXTFILES
         "../cred/servercert.pem"

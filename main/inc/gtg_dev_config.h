@@ -14,9 +14,12 @@
 #define GTG_DEV_CONFIG_MAX_TARGETS  8
 
 /**
- * The runtime configuration of the device. It is only kept in RAM for now, a later version
- * saves it to NVS. The single instance is owned by this module and reached through the
- * functions below, which copy values in and out under a lock, as it is used from several tasks.
+ * The runtime configuration of the device. The single instance is owned by this module and
+ * reached through the functions below, which copy values in and out under a lock, as it is
+ * used from several tasks.
+ *
+ * Every function that changes the configuration also saves it to NVS, in plain text. A failed
+ * save is logged and the change is kept in RAM. gtg_dev_config_load() reads it back.
  */
 typedef struct _gtg_dev_config_ {
     char                    wifi_ssid[GTG_DEV_CONFIG_SSID_MAX_LEN + 1];
@@ -35,11 +38,61 @@ typedef struct _gtg_dev_config_ {
 /**
  * \brief Prepares the empty configuration, must be called once before the other functions
  *
+ * NVS must have been initialized with nvs_flash_init(). The stored configuration is not read,
+ * see gtg_dev_config_load().
+ *
  * \return ESP_OK                ready
  * \return ESP_ERR_INVALID_STATE already initialized
  * \return ESP_ERR_NO_MEM        out of memory
  */
 esp_err_t gtg_dev_config_init(void);
+
+/**
+ * \brief Replaces the runtime configuration with the one stored in NVS
+ *
+ * The stored configuration is checked first. When it is missing or invalid, the runtime
+ * configuration is left as it is.
+ *
+ * \return ESP_OK                   loaded
+ * \return ESP_ERR_NOT_FOUND        nothing is stored, e.g. on first boot or after a factory reset
+ * \return ESP_ERR_INVALID_VERSION  stored by firmware with another format
+ * \return ESP_ERR_INVALID_SIZE     the stored targets don't fit
+ * \return ESP_ERR_INVALID_STATE    not initialized, or a stored target is invalid
+ * \return ESP_ERR_NO_MEM           out of memory
+ * \return other                    error from NVS
+ */
+esp_err_t gtg_dev_config_load(void);
+
+/**
+ * \brief Writes the runtime configuration to NVS
+ *
+ * Changes are saved automatically, this is for saving without a change.
+ *
+ * \return ESP_OK                saved
+ * \return ESP_ERR_INVALID_STATE not initialized
+ * \return other                 error from NVS, e.g. ESP_ERR_NVS_NOT_ENOUGH_SPACE
+ */
+esp_err_t gtg_dev_config_save(void);
+
+/**
+ * \brief Erases the configuration stored in NVS and clears the runtime configuration
+ *
+ * The runtime configuration is cleared also when erasing fails. Other modules keep their own
+ * state, e.g. the WiFi connection and the verified keys, so restart the device afterwards.
+ *
+ * \return ESP_OK                erased
+ * \return ESP_ERR_INVALID_STATE not initialized
+ * \return other                 error from NVS
+ */
+esp_err_t gtg_dev_config_factory_reset(void);
+
+/**
+ * \brief TEMPORARY: logs the configuration stored in NVS, for checking that it persists
+ *
+ * Reads it without loading it into the runtime configuration. The password and keys are only
+ * logged as set or not set with their length. Remove once the boot flow loads the configuration.
+ */
+void gtg_dev_config_log_stored(void);
 
 /**
  * \brief Stores the credentials of the WiFi network the station connected to

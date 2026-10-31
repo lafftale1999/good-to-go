@@ -39,6 +39,10 @@
  *  - DELETE /api/targets {"stop_id": "...", "departure": {...}} removes the departure from
  *    realtime_targets and returns like GET
  *
+ * Factory reset, see gtg_dev_config_factory_reset():
+ *  - POST /api/factory-reset {"confirm": "factory-reset"} erases the stored configuration and
+ *    restarts the device a second after responding
+ *
  * gtg_api_keys_init() must have been called before keys are added.
  *
  * The network interface must be up, e.g. through wifi_softap_init() or
