@@ -1,6 +1,8 @@
 #ifndef GTG_HTTPS_SERVER_H_
 #define GTG_HTTPS_SERVER_H_
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 /**
@@ -14,7 +16,11 @@
  * web/ directory. "/" serves index.html.
  *
  * Device state, see gtg_dev_flag_t in gtg_dev_config.h. The page starts at the first step that isn't done:
- *  - GET  /api/status returns {"connected": bool, "time_synced": bool, "keys_verified": bool, "has_departures": bool}
+ *  - GET  /api/status returns {"connected": bool, "time_synced": bool, "keys_verified": bool,
+ *                              "has_departures": bool, "valid_config": bool}
+ *  - POST /api/config/apply   the "Done" button, returns like /api/status, with 409 Conflict while
+ *                             the configuration isn't valid yet. It changes nothing, the
+ *                             configuration becomes valid by itself
  *
  * WiFi configuration API, see gtg_wifi_station.h:
  *  - POST /api/wifi/connect {"ssid": "...", "pass": "..."} starts connecting the station
@@ -61,5 +67,17 @@ esp_err_t gtg_https_server_init(void);
  * \brief Stops the HTTPS server and releases the resources taken by gtg_https_server_init()
  */
 void gtg_https_server_deinit(void);
+
+/**
+ * \brief Whether the server is running
+ */
+bool gtg_https_server_is_running(void);
+
+/**
+ * \brief esp_timer_get_time() of the last request, or of the start while there has been none
+ *
+ * Every request counts, also the page's own polling, so an open page keeps the server in use.
+ */
+int64_t gtg_https_server_last_activity_us(void);
 
 #endif

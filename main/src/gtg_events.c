@@ -69,6 +69,7 @@ const char *gtg_event_type_name(gtg_event_type_t type)
     case GTG_EV_BUTTON_CLICKED:     return "button clicked";
     case GTG_EV_BUTTON_SHORT_HOLD:  return "button short hold";
     case GTG_EV_BUTTON_LONG_HOLD:   return "button long hold";
+    case GTG_EV_CONFIG_APPLIED:     return "config applied";
     default:                        return "unknown";
     }
 }

@@ -41,6 +41,9 @@ static const char *TAG = "https server";
 static httpd_handle_t s_server = NULL;
 static bool s_www_mounted = false;
 
+/* esp_timer time of the last request, or of the start when none has come yet */
+static volatile int64_t s_last_activity_us = 0;
+
 /* Embedded from cred/ through EMBED_TXTFILES in main/CMakeLists.txt */
 extern const unsigned char servercert_start[] asm("_binary_servercert_pem_start");
 extern const unsigned char servercert_end[]   asm("_binary_servercert_pem_end");
@@ -202,9 +205,9 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
     return send_wifi_status(req, "200 OK");
 }
 
-/* Responds with the runtime flags of the device configuration,
- * {"connected": bool, "time_synced": bool, "keys_verified": bool, "has_departures": bool} */
-static esp_err_t status_get_handler(httpd_req_t *req)
+/* Responds with the runtime flags of the device configuration, {"connected": bool,
+ * "time_synced": bool, "keys_verified": bool, "has_departures": bool, "valid_config": bool} */
+static esp_err_t send_status(httpd_req_t *req, const char *status)
 {
     uint32_t flags = gtg_dev_config_get_flags();
 
@@ -213,14 +216,28 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         || cJSON_AddBoolToObject(json, "connected", flags & GTG_DEV_FLAG_CONNECTED) == NULL
         || cJSON_AddBoolToObject(json, "time_synced", flags & GTG_DEV_FLAG_TIME_SYNCED) == NULL
         || cJSON_AddBoolToObject(json, "keys_verified", flags & GTG_DEV_FLAG_KEYS_VERIFIED) == NULL
-        || cJSON_AddBoolToObject(json, "has_departures", flags & GTG_DEV_FLAG_HAS_DEPARTURES) == NULL) {
+        || cJSON_AddBoolToObject(json, "has_departures", flags & GTG_DEV_FLAG_HAS_DEPARTURES) == NULL
+        || cJSON_AddBoolToObject(json, "valid_config", flags & GTG_DEV_FLAG_VALID_CONFIG) == NULL) {
         cJSON_Delete(json);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
-    esp_err_t err = send_json(req, "200 OK", json);
+    esp_err_t err = send_json(req, status, json);
     cJSON_Delete(json);
     return err;
+}
+
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    return send_status(req, "200 OK");
+}
+
+/* The "Done" button. The configuration becomes valid by itself, so nothing changes here, it
+ * answers like /api/status with 409 Conflict while something is still missing */
+static esp_err_t config_apply_post_handler(httpd_req_t *req)
+{
+    bool valid = gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG;
+    return send_status(req, valid ? "200 OK" : "409 Conflict");
 }
 
 /* Receives and parses a JSON body. On NULL the error response has been sent and
@@ -892,15 +909,43 @@ static const httpd_uri_t api_uris[] = {
         .method    = HTTP_POST,
         .handler   = factory_reset_post_handler,
     },
+    {
+        .uri       = "/api/config/apply",
+        .method    = HTTP_POST,
+        .handler   = config_apply_post_handler,
+    },
+    /* Must stay last. URI handlers are matched in registration order, so the API endpoints
+     * come before this catch-all */
+    {
+        .uri       = "/*",
+        .method    = HTTP_GET,
+        .handler   = static_file_get_handler,
+    },
 };
 
-/* Must stay registered last. URI handlers are matched in registration order,
- * so register API endpoints before this catch-all */
-static const httpd_uri_t static_file_uri = {
-    .uri       = "/*",
-    .method    = HTTP_GET,
-    .handler   = static_file_get_handler,
-};
+#define URI_COUNT   (sizeof(api_uris) / sizeof(api_uris[0]))
+
+/* Every URI is registered with this handler, which stamps the request as activity and then
+ * calls the URI's own handler with its own user_ctx */
+static esp_err_t tracked_handler(httpd_req_t *req)
+{
+    const httpd_uri_t *uri = req->user_ctx;
+
+    s_last_activity_us = esp_timer_get_time();
+
+    req->user_ctx = uri->user_ctx;
+    return uri->handler(req);
+}
+
+int64_t gtg_https_server_last_activity_us(void)
+{
+    return s_last_activity_us;
+}
+
+bool gtg_https_server_is_running(void)
+{
+    return s_server != NULL;
+}
 
 static esp_err_t www_mount(void)
 {
@@ -942,7 +987,7 @@ esp_err_t gtg_https_server_init(void)
 
     httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
     conf.httpd.uri_match_fn = httpd_uri_match_wildcard;
-    conf.httpd.max_uri_handlers = sizeof(api_uris) / sizeof(api_uris[0]) + 1;
+    conf.httpd.max_uri_handlers = URI_COUNT;
 
     /* the API key and stop search handlers make their own TLS connections from the server task */
     conf.httpd.stack_size = HTTPD_STACK_SIZE;
@@ -961,17 +1006,21 @@ esp_err_t gtg_https_server_init(void)
         return err;
     }
 
-    for (size_t i = 0; i < sizeof(api_uris) / sizeof(api_uris[0]) && err == ESP_OK; i++) {
-        err = httpd_register_uri_handler(s_server, &api_uris[i]);
-    }
-    if (err == ESP_OK) {
-        err = httpd_register_uri_handler(s_server, &static_file_uri);
+    for (size_t i = 0; i < URI_COUNT && err == ESP_OK; i++) {
+        /* registering copies the struct, the user_ctx points back at the URI's entry */
+        httpd_uri_t tracked = api_uris[i];
+        tracked.handler = tracked_handler;
+        tracked.user_ctx = (void *)&api_uris[i];
+        err = httpd_register_uri_handler(s_server, &tracked);
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to register URI handlers");
         gtg_https_server_deinit();
         return err;
     }
+
+    /* the idle time counts from the start until the first request */
+    s_last_activity_us = esp_timer_get_time();
 
     ESP_LOGI(TAG, "server started on port %d", conf.port_secure);
 

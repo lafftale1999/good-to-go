@@ -7,8 +7,6 @@
 #include "gtg_departures.h"
 #include "gtg_stop_search.h"
 
-
-
 typedef struct _trafiklab_target_ {
     gtg_stop_t              stop;
     gtg_departure_option_t  departure;

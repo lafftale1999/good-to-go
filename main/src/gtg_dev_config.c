@@ -5,10 +5,12 @@
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "nvs.h"
 
 #include "gtg_ntp.h"
+#include "gtg_events.h"
 
 /*
  * NVS layout, one key per field in the "gtg_cfg" namespace. Key names are at most 15 characters.
@@ -29,8 +31,14 @@
 
 static const char *TAG = "dev config";
 
+/* every flag the configuration needs before GTG_DEV_FLAG_VALID_CONFIG is set */
+#define VALID_CONFIG_REQUIRED_FLAGS (GTG_DEV_FLAG_CONNECTED | GTG_DEV_FLAG_KEYS_VERIFIED | GTG_DEV_FLAG_HAS_DEPARTURES)
+
 static gtg_dev_config_t s_config;
 static SemaphoreHandle_t s_mutex = NULL;
+
+/* mirrors s_config.flags, so gtg_dev_config_wait_flags() can block on them */
+static EventGroupHandle_t s_flag_events = NULL;
 
 static esp_err_t save_locked(void);
 
@@ -51,17 +59,44 @@ static const char *flag_name(gtg_dev_flag_t flag)
     case GTG_DEV_FLAG_TIME_SYNCED:    return "time synced";
     case GTG_DEV_FLAG_KEYS_VERIFIED:  return "keys verified";
     case GTG_DEV_FLAG_HAS_DEPARTURES: return "has departures";
+    case GTG_DEV_FLAG_VALID_CONFIG:   return "valid config";
     default:                          return "unknown";
     }
 }
 
-/* Called with the lock held */
-static void set_flag_locked(gtg_dev_flag_t flag, bool on)
+/* Called with the lock held. True when the flag changed */
+static bool change_flag_locked(gtg_dev_flag_t flag, bool on)
 {
     uint32_t flags = on ? s_config.flags | flag : s_config.flags & ~(uint32_t)flag;
-    if (flags != s_config.flags) {
-        s_config.flags = flags;
-        ESP_LOGI(TAG, "flag %s: %s", flag_name(flag), on ? "on" : "off");
+    if (flags == s_config.flags) {
+        return false;
+    }
+
+    s_config.flags = flags;
+    ESP_LOGI(TAG, "flag %s: %s", flag_name(flag), on ? "on" : "off");
+
+    if (on) {
+        xEventGroupSetBits(s_flag_events, flag);
+    } else {
+        xEventGroupClearBits(s_flag_events, flag);
+    }
+
+    return true;
+}
+
+/* Called with the lock held. Every flag changes through here, so GTG_DEV_FLAG_VALID_CONFIG
+ * follows the flags it depends on both ways */
+static void set_flag_locked(gtg_dev_flag_t flag, bool on)
+{
+    if (!change_flag_locked(flag, on)) {
+        return;
+    }
+
+    bool valid = (s_config.flags & VALID_CONFIG_REQUIRED_FLAGS) == VALID_CONFIG_REQUIRED_FLAGS;
+    if (change_flag_locked(GTG_DEV_FLAG_VALID_CONFIG, valid) && valid) {
+        /* non-blocking, so it is safe with the lock held */
+        gtg_event_t event = { .type = GTG_EV_CONFIG_APPLIED };
+        gtg_events_post(&event);
     }
 }
 
@@ -74,6 +109,11 @@ static void update_departures_flag_locked(void)
 void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on)
 {
     if (s_mutex == NULL) {
+        return;
+    }
+
+    if (flag == GTG_DEV_FLAG_VALID_CONFIG) {
+        ESP_LOGE(TAG, "flag %s follows the other flags and can't be set", flag_name(flag));
         return;
     }
 
@@ -93,6 +133,17 @@ uint32_t gtg_dev_config_get_flags(void)
     xSemaphoreGive(s_mutex);
 
     return flags;
+}
+
+esp_err_t gtg_dev_config_wait_flags(uint32_t flags, TickType_t ticks)
+{
+    if (s_flag_events == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_flag_events, flags, pdFALSE, pdTRUE, ticks);
+
+    return (bits & flags) == flags ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 /* Stamps the change and saves the configuration. A failed save is only logged, the change
@@ -134,8 +185,17 @@ esp_err_t gtg_dev_config_init(void)
     }
     s_config.realtime_targets.size = GTG_DEV_CONFIG_MAX_TARGETS;
 
+    s_flag_events = xEventGroupCreate();
     s_mutex = xSemaphoreCreateMutex();
-    if (s_mutex == NULL) {
+    if (s_mutex == NULL || s_flag_events == NULL) {
+        if (s_mutex != NULL) {
+            vSemaphoreDelete(s_mutex);
+            s_mutex = NULL;
+        }
+        if (s_flag_events != NULL) {
+            vEventGroupDelete(s_flag_events);
+            s_flag_events = NULL;
+        }
         free(s_config.realtime_targets.list);
         s_config.realtime_targets.list = NULL;
         s_config.realtime_targets.size = 0;

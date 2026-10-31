@@ -34,7 +34,8 @@ static const char *TAG = "wifi softAP";
 static esp_netif_t *s_ap_netif = NULL;
 static esp_event_handler_instance_t s_wifi_event_instance = NULL;
 static EventGroupHandle_t s_ap_event_group = NULL;
-static int s_client_count = 0;
+/* written from the WiFi event task, read by other tasks through wifi_softap_has_client() */
+static volatile int s_client_count = 0;
 
 static void generate_credentials(wifi_ap_meta_t *wifi_ap_meta) {
     char *pos;
@@ -157,6 +158,16 @@ void wifi_softap_deinit(void) {
     vEventGroupDelete(s_ap_event_group);
     s_ap_event_group = NULL;
     s_client_count = 0;
+}
+
+bool wifi_softap_is_running(void)
+{
+    return s_ap_netif != NULL;
+}
+
+bool wifi_softap_has_client(void)
+{
+    return s_client_count > 0;
 }
 
 esp_err_t wifi_softap_wait_for_client(TickType_t ticks)

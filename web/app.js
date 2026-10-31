@@ -17,6 +17,8 @@ const addStatus = document.getElementById("add-status");
 const savedCount = document.getElementById("saved-count");
 const savedList = document.getElementById("saved-list");
 const savedStatus = document.getElementById("saved-status");
+const doneButton = document.getElementById("done");
+const doneStatus = document.getElementById("done-status");
 
 /* Collapses an .options list to the picked item when one is picked. The other items are only
  * hidden, so the button below the list shows them again without asking the device */
@@ -569,6 +571,39 @@ stopForm.addEventListener("submit", async (event) => {
         stopStatus.textContent = "Could not reach the device, try again.";
     } finally {
         setBusy(stopForm, false);
+    }
+});
+
+/* The device's configuration becomes valid by itself, the button only asks whether it is and
+ * tells what is still missing. Answered like /api/status, with 409 while it isn't valid */
+doneButton.addEventListener("click", async () => {
+    doneButton.disabled = true;
+    doneStatus.textContent = "";
+
+    try {
+        const response = await fetch("/api/config/apply", { method: "POST" });
+        const status = await response.json();
+
+        if (status.valid_config) {
+            doneStatus.textContent = "Your device is good to go! You can close this page.";
+            return;
+        }
+
+        const missing = [];
+        if (!status.connected) {
+            missing.push("a WiFi connection");
+        }
+        if (!status.keys_verified) {
+            missing.push("verified API keys");
+        }
+        if (!status.has_departures) {
+            missing.push("at least one saved departure");
+        }
+        doneStatus.textContent = `Not done yet, the device still needs ${missing.join(", ")}.`;
+    } catch {
+        doneStatus.textContent = "Could not reach the device, try again.";
+    } finally {
+        doneButton.disabled = false;
     }
 });
 
