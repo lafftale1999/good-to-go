@@ -11,6 +11,8 @@
 #include "esp_log.h"
 #include "esp_check.h"
 
+#include "gtg_dev_config.h"
+
 #define WIFI_STA_MAXIMUM_RETRY     5
 
 #define WIFI_STA_SSID_MAX_LEN      32
@@ -22,6 +24,9 @@
 
 /* Set while the station is connected with an IP, wifi_station_wait_connected() waits for it */
 #define WIFI_CONNECTED_BIT BIT0
+
+/* Set once the station gave up after the retries, until the next wifi_station_connect() */
+#define WIFI_FAILED_BIT    BIT1
 
 static const char *TAG = "wifi station";
 
@@ -36,6 +41,30 @@ static volatile wifi_station_state_t s_state = WIFI_STATION_IDLE;
 static volatile uint8_t s_last_reason = 0;
 static int s_retry_num = 0;
 
+/* Stores the credentials the driver connected with in the device configuration, so only
+ * credentials that work end up there */
+static void store_connected_credentials(void)
+{
+    wifi_config_t wifi_config;
+    if (esp_wifi_get_config(WIFI_IF_STA, &wifi_config) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to read the connected credentials");
+        return;
+    }
+
+    /* ssid and password are not NUL terminated when they use the full field length */
+    char ssid[GTG_DEV_CONFIG_SSID_MAX_LEN + 1] = { 0 };
+    char pass[GTG_DEV_CONFIG_PASS_MAX_LEN + 1] = { 0 };
+    memcpy(ssid, wifi_config.sta.ssid, strnlen((const char *)wifi_config.sta.ssid, sizeof(ssid) - 1));
+    memcpy(pass, wifi_config.sta.password, strnlen((const char *)wifi_config.sta.password, sizeof(pass) - 1));
+
+    if (gtg_dev_config_set_wifi(ssid, pass) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to store the connected credentials");
+    }
+
+    memset(&wifi_config, 0, sizeof(wifi_config));
+    memset(pass, 0, sizeof(pass));
+}
+
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                     int32_t event_id, void* event_data)
 {
@@ -44,6 +73,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGW(TAG, "disconnected from AP, reason=%d", event->reason);
 
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        gtg_dev_config_set_flag(GTG_DEV_FLAG_CONNECTED, false);
 
         /* disconnects we asked for ourselves, or after giving up, are not retried */
         if (s_state == WIFI_STATION_IDLE || s_state == WIFI_STATION_FAILED) {
@@ -60,13 +90,19 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         } else {
             ESP_LOGE(TAG, "failed to connect, reason=%d", event->reason);
             s_state = WIFI_STATION_FAILED;
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         s_last_reason = 0;
+
+        /* before the state changes, so the configuration has them once the connection is reported */
+        store_connected_credentials();
+
         s_state = WIFI_STATION_CONNECTED;
+        gtg_dev_config_set_flag(GTG_DEV_FLAG_CONNECTED, true);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -195,11 +231,13 @@ esp_err_t wifi_station_connect(const char *ssid, const char *pass)
     s_retry_num = 0;
     s_last_reason = 0;
     s_state = WIFI_STATION_CONNECTING;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_FAILED_BIT);
 
     err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
         s_state = WIFI_STATION_FAILED;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
         return err;
     }
 
@@ -306,6 +344,24 @@ esp_err_t wifi_station_wait_connected(TickType_t ticks)
             ticks);
 
     return (bits & WIFI_CONNECTED_BIT) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t wifi_station_wait_result(TickType_t ticks)
+{
+    if (s_wifi_event_group == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+            WIFI_CONNECTED_BIT | WIFI_FAILED_BIT,
+            pdFALSE,
+            pdFALSE,
+            ticks);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        return ESP_OK;
+    }
+    return (bits & WIFI_FAILED_BIT) ? ESP_FAIL : ESP_ERR_TIMEOUT;
 }
 
 void wifi_station_deinit(void) {

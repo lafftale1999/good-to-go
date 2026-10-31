@@ -9,19 +9,65 @@
 <body>
     <main>
         <h1>Good to go</h1>
-        <form id="wifi-form">
-            <button type="button" id="scan">Scan for networks</button>
-            <ul id="networks"></ul>
-            <label>
-                Network name
-                <input name="ssid" required maxlength="32" autocomplete="off">
-            </label>
-            <label>
-                Password
-                <input name="pass" type="password" required minlength="8" maxlength="63">
-            </label>
-            <button type="submit">Connect</button>
-        </form>
+        <section id="wifi-step">
+            <form id="wifi-form">
+                <button type="button" id="scan">Scan for networks</button>
+                <ul id="networks"></ul>
+                <label>
+                    Network name
+                    <input name="ssid" required maxlength="32" autocomplete="off">
+                </label>
+                <label>
+                    Password
+                    <input name="pass" type="password" required minlength="8" maxlength="63">
+                </label>
+                <button type="submit">Connect</button>
+            </form>
+        </section>
+        <section id="keys-step" hidden>
+            <p>Connected to WiFi. Now add your API keys.</p>
+            <form class="key-form" data-service="trafiklab">
+                <label>
+                    Trafiklab API key
+                    <input name="key" required maxlength="64" pattern="[A-Za-z0-9_\-]+" autocomplete="off" spellcheck="false">
+                </label>
+                <button type="submit">Verify</button>
+                <p class="key-status" role="status"></p>
+            </form>
+            <form class="key-form" data-service="google">
+                <label>
+                    Google API key
+                    <input name="key" required maxlength="64" pattern="[A-Za-z0-9_\-]+" autocomplete="off" spellcheck="false">
+                </label>
+                <button type="submit">Verify</button>
+                <p class="key-status" role="status"></p>
+            </form>
+        </section>
+        <section id="stops-step" hidden>
+            <section id="saved" aria-labelledby="saved-title">
+                <h2 id="saved-title">Saved departures</h2>
+                <p id="saved-count"></p>
+                <ul id="saved-list"></ul>
+                <p id="saved-status" role="status"></p>
+            </section>
+            <p>Search for the stop you want to track!</p>
+            <form id="stop-form">
+                <label>
+                    Stop name
+                    <input name="query" required maxlength="64" autocomplete="off" placeholder="e.g. Sveavägen">
+                </label>
+                <button type="submit">Search</button>
+            </form>
+            <p id="stop-status" role="status"></p>
+            <ul id="stops" class="options"></ul>
+            <button type="button" id="more-stops" class="show-more" hidden></button>
+            <button type="button" id="find-departures" hidden>Search for available departures</button>
+            <p id="departure-status" role="status"></p>
+            <ul id="departures" class="options"></ul>
+            <button type="button" id="more-departures" class="show-more" hidden></button>
+            <button type="button" id="add-departure" hidden>Add to departures</button>
+            <p id="add-status" role="status"></p>
+        </section>
         <p id="status" role="status"></p>
     </main>
     <script src="/app.js"></script>

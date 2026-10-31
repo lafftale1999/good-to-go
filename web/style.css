@@ -10,9 +10,162 @@ body {
     place-items: center;
 }
 
+[hidden] {
+    display: none !important;
+}
+
 main {
     padding: 0 16px;
     text-align: center;
+}
+
+#keys-step {
+    display: grid;
+    gap: 24px;
+}
+
+#stops-step {
+    display: grid;
+    gap: 16px;
+}
+
+.key-status, #stop-status, #departure-status, #add-status {
+    margin: 0;
+}
+
+.key-status:empty, #stop-status:empty, #departure-status:empty, #add-status:empty, .options:empty {
+    display: none;
+}
+
+/* selectable lists of stops and departures */
+.options {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 4px;
+    text-align: left;
+}
+
+.options label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.options label:has(input:checked) {
+    border-color: currentColor;
+}
+
+/* the departures already saved, at the top of the stop step */
+#saved {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 4px;
+    text-align: left;
+}
+
+#saved h2 {
+    margin: 0;
+    font-size: 1.1em;
+}
+
+#saved-count {
+    margin: 0;
+    opacity: 0.7;
+}
+
+#saved-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 4px;
+}
+
+#saved-list:empty {
+    display: none;
+}
+
+#saved-list li {
+    display: flex;
+    gap: 8px;
+}
+
+#saved-list .saved-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#saved-list li {
+    align-items: center;
+}
+
+#saved-list .details {
+    margin-left: auto;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+#saved-list .remove {
+    flex-shrink: 0;
+    padding: 0 6px;
+    border: none;
+    background: none;
+    color: inherit;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+#saved-list .remove:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+#saved-status {
+    margin: 0;
+}
+
+#saved-status:empty {
+    display: none;
+}
+
+/* expands a collapsed .options list, styled as a link so it doesn't read as a next step */
+.show-more {
+    justify-self: start;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+/* departures already tracked */
+.options label:has(input:disabled) {
+    cursor: default;
+    opacity: 0.6;
+}
+
+.options .option-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.options .details {
+    margin-left: auto;
+    flex-shrink: 0;
+    opacity: 0.7;
 }
 
 form {

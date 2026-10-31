@@ -9,6 +9,8 @@
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
 
+#include "gtg_dev_config.h"
+
 /* POSIX TZ for Europe/Stockholm: CET (UTC+1), CEST (UTC+2) from the last
  * Sunday of March 02:00 to the last Sunday of October 03:00 */
 #define GTG_NTP_TIMEZONE           "CET-1CEST,M3.5.0,M10.5.0/3"
@@ -27,6 +29,7 @@ static volatile bool s_time_synced = false;
 static void time_sync_notification_cb(struct timeval *tv)
 {
     s_time_synced = true;
+    gtg_dev_config_set_flag(GTG_DEV_FLAG_TIME_SYNCED, true);
 
     char buf[GTG_NTP_TIME_STR_MIN_LEN];
     struct tm timeinfo;

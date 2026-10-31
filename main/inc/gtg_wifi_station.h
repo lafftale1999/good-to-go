@@ -99,6 +99,18 @@ wifi_station_state_t wifi_station_get_state(uint8_t *reason);
 esp_err_t wifi_station_wait_connected(TickType_t ticks);
 
 /**
+ * \brief Blocks until the connection started by wifi_station_connect() succeeds or gives up
+ *
+ * \param ticks maximum time to wait, portMAX_DELAY waits forever
+ *
+ * \return ESP_OK                connected
+ * \return ESP_FAIL              gave up after the retries, see wifi_station_get_state() for the reason
+ * \return ESP_ERR_TIMEOUT       neither within the given time
+ * \return ESP_ERR_INVALID_STATE station is not initialized
+ */
+esp_err_t wifi_station_wait_result(TickType_t ticks);
+
+/**
  * \brief Disconnects from the network and releases the resources taken by wifi_station_init()
  *
  * A running softAP is not affected.

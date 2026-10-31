@@ -1,6 +1,7 @@
 #include "gtg_https_server.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <stdbool.h>
@@ -9,9 +10,15 @@
 #include "esp_check.h"
 #include "esp_https_server.h"
 #include "esp_littlefs.h"
+#include "esp_timer.h"
+#include "esp_system.h"
 #include "cJSON.h"
 
 #include "gtg_wifi_station.h"
+#include "gtg_api_keys.h"
+#include "gtg_stop_search.h"
+#include "gtg_departures.h"
+#include "gtg_dev_config.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -19,8 +26,14 @@
 #define WWW_GZIP_SUFFIX       ".gz"
 
 #define FILE_CHUNK_SIZE       1024
-#define API_BODY_MAX_LEN      256
+/* fits a target from /api/targets with every field at its full length */
+#define API_BODY_MAX_LEN      512
 #define WIFI_SCAN_MAX_RESULTS 10
+#define HTTPD_STACK_SIZE      16384
+
+/* lets the response reach the browser before the device restarts after a factory reset */
+#define FACTORY_RESET_RESTART_DELAY_US  (1000 * 1000)
+#define FACTORY_RESET_CONFIRM           "factory-reset"
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
 
 static const char *TAG = "https server";
@@ -189,15 +202,36 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
     return send_wifi_status(req, "200 OK");
 }
 
-/* Expects {"ssid": "...", "pass": "..."} and starts connecting without waiting for the
- * result, as the softAP can drop for a moment when it moves to the router's channel.
- * The result is polled through /api/wifi/status */
-static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
+/* Responds with the runtime flags of the device configuration,
+ * {"connected": bool, "time_synced": bool, "keys_verified": bool, "has_departures": bool} */
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    uint32_t flags = gtg_dev_config_get_flags();
+
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL
+        || cJSON_AddBoolToObject(json, "connected", flags & GTG_DEV_FLAG_CONNECTED) == NULL
+        || cJSON_AddBoolToObject(json, "time_synced", flags & GTG_DEV_FLAG_TIME_SYNCED) == NULL
+        || cJSON_AddBoolToObject(json, "keys_verified", flags & GTG_DEV_FLAG_KEYS_VERIFIED) == NULL
+        || cJSON_AddBoolToObject(json, "has_departures", flags & GTG_DEV_FLAG_HAS_DEPARTURES) == NULL) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
+/* Receives and parses a JSON body. On NULL the error response has been sent and
+ * *err holds the handler's return value */
+static cJSON *receive_json(httpd_req_t *req, esp_err_t *err)
 {
     char body[API_BODY_MAX_LEN + 1];
 
     if (req->content_len == 0 || req->content_len > API_BODY_MAX_LEN) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        *err = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        return NULL;
     }
 
     size_t received = 0;
@@ -207,7 +241,8 @@ static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
             continue;
         }
         if (ret <= 0) {
-            return ESP_FAIL;
+            *err = ESP_FAIL;
+            return NULL;
         }
         received += ret;
     }
@@ -215,17 +250,31 @@ static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
 
     cJSON *json = cJSON_Parse(body);
 
-    /* the body contains the password */
+    /* the body can contain passwords and keys */
     memset(body, 0, sizeof(body));
 
     if (json == NULL) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        *err = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    }
+
+    return json;
+}
+
+/* Expects {"ssid": "...", "pass": "..."} and starts connecting without waiting for the
+ * result, as the softAP can drop for a moment when it moves to the router's channel.
+ * The result is polled through /api/wifi/status */
+static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
     }
 
     const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "ssid"));
     char *pass = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "pass"));
 
-    esp_err_t err = wifi_station_connect(ssid, pass);
+    err = wifi_station_connect(ssid, pass);
 
     if (pass != NULL) {
         memset(pass, 0, strlen(pass));
@@ -290,7 +339,497 @@ static esp_err_t wifi_scan_get_handler(httpd_req_t *req)
     return err;
 }
 
+/* Responds with {"trafiklab": true|false, "google": true|false}, true once a verified key is stored */
+static esp_err_t send_api_keys_status(httpd_req_t *req)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL
+        || cJSON_AddBoolToObject(json, "trafiklab", gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB)) == NULL
+        || cJSON_AddBoolToObject(json, "google", gtg_api_keys_is_set(GTG_API_KEY_GOOGLE)) == NULL) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t api_keys_status_get_handler(httpd_req_t *req)
+{
+    return send_api_keys_status(req);
+}
+
+typedef struct {
+    gtg_api_key_t key;
+    const char *name;
+    const char *rejected_msg;
+} api_key_endpoint_t;
+
+static const api_key_endpoint_t TRAFIKLAB_KEY_ENDPOINT = {
+    .key          = GTG_API_KEY_TRAFIKLAB,
+    .name         = "Trafiklab",
+    .rejected_msg = "Trafiklab rejected the key, check that it is correct",
+};
+
+static const api_key_endpoint_t GOOGLE_KEY_ENDPOINT = {
+    .key          = GTG_API_KEY_GOOGLE,
+    .name         = "Google",
+    .rejected_msg = "Google rejected the key, check that it is correct and that the Geocoding API is enabled for it",
+};
+
+/* Expects {"key": "..."}, verifies the key with a request to the service and stores it
+ * when it works. Blocks for the length of that request. Responds like /api/keys/status */
+static esp_err_t api_key_post_handler(httpd_req_t *req)
+{
+    const api_key_endpoint_t *endpoint = req->user_ctx;
+
+    if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Connect to WiFi first");
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    char *key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "key"));
+    err = key != NULL ? gtg_api_keys_set(endpoint->key, key) : ESP_ERR_INVALID_ARG;
+
+    if (key != NULL) {
+        memset(key, 0, strlen(key));
+    }
+    cJSON_Delete(json);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        _Static_assert(GTG_API_KEY_MAX_LEN == 64, "update the message below");
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "The key must be 1-64 letters, digits, '-' or '_'");
+    }
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, endpoint->rejected_msg);
+    }
+    if (err != ESP_OK) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Could not verify the key with %s, try again", endpoint->name);
+        httpd_resp_set_status(req, "502 Bad Gateway");
+        return httpd_resp_sendstr(req, msg);
+    }
+
+    return send_api_keys_status(req);
+}
+
+/* Expects {"query": "..."} and responds with [{"id": "...", "name": "...", "town": "..."}, ...],
+ * busiest first. Blocks for the length of the requests to Trafiklab and Google */
+static esp_err_t stops_search_post_handler(httpd_req_t *req)
+{
+    if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Connect to WiFi first");
+    }
+    if (!gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB) || !gtg_api_keys_is_set(GTG_API_KEY_GOOGLE)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Verify both API keys first");
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    gtg_stop_t stops[GTG_STOP_SEARCH_MAX_RESULTS];
+    size_t count = 0;
+
+    const char *query = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "query"));
+    err = query != NULL ? gtg_stop_search(query, stops, &count) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(json);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Enter a stop name of at most 64 characters");
+    }
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, "Trafiklab rejected the key");
+    }
+    if (err == ESP_ERR_INVALID_SIZE) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, "Too many stops match, try a more specific name");
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "stop search failed: %s", esp_err_to_name(err));
+        httpd_resp_set_status(req, "502 Bad Gateway");
+        return httpd_resp_sendstr(req, "Could not search Trafiklab, try again");
+    }
+
+    json = cJSON_CreateArray();
+    for (size_t i = 0; json != NULL && i < count; i++) {
+        cJSON *stop = cJSON_CreateObject();
+
+        /* once added, the object is freed together with the array */
+        bool ok = stop != NULL && cJSON_AddItemToArray(json, stop);
+        if (!ok) {
+            cJSON_Delete(stop);
+        }
+
+        ok = ok
+            && cJSON_AddStringToObject(stop, "id", stops[i].id) != NULL
+            && cJSON_AddStringToObject(stop, "name", stops[i].name) != NULL
+            && cJSON_AddStringToObject(stop, "town", stops[i].town) != NULL;
+        if (!ok) {
+            cJSON_Delete(json);
+            json = NULL;
+        }
+    }
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
+/* Expects {"stop_id": "..."} and responds with
+ * {"options": [{"line": "...", "mode": "...", "destination": "...", "tracked": bool}, ...], "samples": 8, "failed": n},
+ * one option per unique departure during a whole day, tracked when it is in realtime_targets.
+ * Blocks for the length of the requests to Trafiklab */
+static esp_err_t departures_available_post_handler(httpd_req_t *req)
+{
+    if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Connect to WiFi first");
+    }
+    if (!gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Verify the Trafiklab key first");
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    /* too large for the server task's stack next to the TLS connection */
+    gtg_departure_option_t *options = malloc(GTG_DEPARTURES_MAX_OPTIONS * sizeof(gtg_departure_option_t));
+    size_t count = 0;
+    size_t failed = 0;
+
+    /* kept past the request body for marking the tracked options */
+    char stop_id[GTG_STOP_ID_MAX_LEN + 1] = "";
+    const char *requested_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "stop_id"));
+
+    if (options == NULL) {
+        err = ESP_ERR_NO_MEM;
+    } else if (requested_id == NULL || strlcpy(stop_id, requested_id, sizeof(stop_id)) >= sizeof(stop_id)) {
+        err = ESP_ERR_INVALID_ARG;
+    } else {
+        err = gtg_departures_list_options(stop_id, options, &count, &failed);
+    }
+    cJSON_Delete(json);
+
+    if (err != ESP_OK) {
+        free(options);
+    }
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop id");
+    }
+    if (err == ESP_ERR_NOT_FINISHED) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "The device clock isn't set yet, try again in a moment");
+    }
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "Trafiklab doesn't know this stop, search again");
+    }
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, "Trafiklab rejected the key");
+    }
+    if (err == ESP_ERR_NO_MEM) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "departure lookup failed: %s", esp_err_to_name(err));
+        httpd_resp_set_status(req, "502 Bad Gateway");
+        return httpd_resp_sendstr(req, "Could not fetch departures from Trafiklab, try again");
+    }
+
+    json = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(json, "options");
+    if (list == NULL
+        || cJSON_AddNumberToObject(json, "samples", GTG_DEPARTURES_SAMPLES) == NULL
+        || cJSON_AddNumberToObject(json, "failed", failed) == NULL) {
+        cJSON_Delete(json);
+        json = NULL;
+    }
+
+    for (size_t i = 0; json != NULL && i < count; i++) {
+        cJSON *option = cJSON_CreateObject();
+
+        /* once added, the object is freed together with the response */
+        bool ok = option != NULL && cJSON_AddItemToArray(list, option);
+        if (!ok) {
+            cJSON_Delete(option);
+        }
+
+        ok = ok
+            && cJSON_AddStringToObject(option, "line", options[i].line) != NULL
+            && cJSON_AddStringToObject(option, "mode", options[i].mode) != NULL
+            && cJSON_AddStringToObject(option, "destination", options[i].destination) != NULL
+            && cJSON_AddBoolToObject(option, "tracked", gtg_dev_config_has_target(stop_id, &options[i])) != NULL;
+        if (!ok) {
+            cJSON_Delete(json);
+            json = NULL;
+        }
+    }
+    free(options);
+
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
+/* Copies a string member into a fixed field. False when it is missing, too long or holds control
+ * characters, or when it is empty and required */
+static bool copy_json_string(const cJSON *object, const char *name, char *field, size_t field_size, bool required)
+{
+    const char *value = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, name));
+    if (value == NULL || (required && value[0] == '\0')) {
+        return false;
+    }
+
+    for (const char *c = value; *c != '\0'; c++) {
+        if ((unsigned char)*c < 0x20 || *c == 0x7f) {
+            return false;
+        }
+    }
+
+    return strlcpy(field, value, field_size) < field_size;
+}
+
+static bool is_digits(const char *s)
+{
+    for (; *s != '\0'; s++) {
+        if (*s < '0' || *s > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Adds {"id", "name", "town"} of the stop and {"line", "mode", "destination"} of the departure */
+static bool add_target_json(cJSON *list, const trafiklab_target_t *target)
+{
+    cJSON *item = cJSON_CreateObject();
+
+    /* once added, the object is freed together with the list */
+    if (item == NULL || !cJSON_AddItemToArray(list, item)) {
+        cJSON_Delete(item);
+        return false;
+    }
+
+    cJSON *stop = cJSON_AddObjectToObject(item, "stop");
+    cJSON *departure = cJSON_AddObjectToObject(item, "departure");
+
+    return stop != NULL && departure != NULL
+        && cJSON_AddStringToObject(stop, "id", target->stop.id) != NULL
+        && cJSON_AddStringToObject(stop, "name", target->stop.name) != NULL
+        && cJSON_AddStringToObject(stop, "town", target->stop.town) != NULL
+        && cJSON_AddStringToObject(departure, "line", target->departure.line) != NULL
+        && cJSON_AddStringToObject(departure, "mode", target->departure.mode) != NULL
+        && cJSON_AddStringToObject(departure, "destination", target->departure.destination) != NULL;
+}
+
+/* Responds with {"targets": [{"stop": {...}, "departure": {...}}, ...], "max": 8}, in the order added */
+static esp_err_t send_targets(httpd_req_t *req, const char *status)
+{
+    trafiklab_target_t targets[GTG_DEV_CONFIG_MAX_TARGETS];
+    size_t count = 0;
+    if (gtg_dev_config_get_targets(targets, GTG_DEV_CONFIG_MAX_TARGETS, &count) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not read the tracked departures");
+    }
+
+    cJSON *json = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(json, "targets");
+    bool ok = list != NULL && cJSON_AddNumberToObject(json, "max", GTG_DEV_CONFIG_MAX_TARGETS) != NULL;
+
+    for (size_t i = 0; ok && i < count; i++) {
+        ok = add_target_json(list, &targets[i]);
+    }
+
+    if (!ok) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, status, json);
+    cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t targets_get_handler(httpd_req_t *req)
+{
+    return send_targets(req, "200 OK");
+}
+
+/* Expects {"stop": {"id": "...", "name": "...", "town": "..."},
+ *          "departure": {"line": "...", "mode": "...", "destination": "..."}}
+ * as returned by /api/stops/search and /api/departures/available, adds it to realtime_targets
+ * and responds like GET /api/targets */
+static esp_err_t targets_post_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    const cJSON *stop = cJSON_GetObjectItemCaseSensitive(json, "stop");
+    const cJSON *departure = cJSON_GetObjectItemCaseSensitive(json, "departure");
+
+    trafiklab_target_t target = { 0 };
+    bool valid = copy_json_string(stop, "id", target.stop.id, sizeof(target.stop.id), true)
+        && is_digits(target.stop.id)
+        && copy_json_string(stop, "name", target.stop.name, sizeof(target.stop.name), true)
+        && copy_json_string(stop, "town", target.stop.town, sizeof(target.stop.town), false)
+        && copy_json_string(departure, "line", target.departure.line, sizeof(target.departure.line), false)
+        && copy_json_string(departure, "mode", target.departure.mode, sizeof(target.departure.mode), true)
+        && copy_json_string(departure, "destination", target.departure.destination,
+                            sizeof(target.departure.destination), true);
+    cJSON_Delete(json);
+
+    if (!valid) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+    }
+
+    err = gtg_dev_config_add_target(&target, NULL);
+
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "This departure is already tracked");
+    }
+    if (err == ESP_ERR_INVALID_SIZE) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "You can track at most %d departures", GTG_DEV_CONFIG_MAX_TARGETS);
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, msg);
+    }
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not add the departure");
+    }
+
+    return send_targets(req, "201 Created");
+}
+
+/* Expects {"stop_id": "...", "departure": {"line": "...", "mode": "...", "destination": "..."}},
+ * removes that target from realtime_targets and responds like GET /api/targets. The target is
+ * named by its content rather than its place, which can change from another tab */
+static esp_err_t targets_delete_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    const cJSON *departure = cJSON_GetObjectItemCaseSensitive(json, "departure");
+
+    char stop_id[GTG_STOP_ID_MAX_LEN + 1] = "";
+    gtg_departure_option_t option = { 0 };
+    bool valid = copy_json_string(json, "stop_id", stop_id, sizeof(stop_id), true)
+        && copy_json_string(departure, "line", option.line, sizeof(option.line), false)
+        && copy_json_string(departure, "mode", option.mode, sizeof(option.mode), true)
+        && copy_json_string(departure, "destination", option.destination, sizeof(option.destination), true);
+    cJSON_Delete(json);
+
+    if (!valid) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+    }
+
+    err = gtg_dev_config_remove_target(stop_id, &option);
+
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "This departure is no longer tracked");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not remove the departure");
+    }
+
+    return send_targets(req, "200 OK");
+}
+
+static void restart_cb(void *arg)
+{
+    esp_restart();
+}
+
+/* Expects {"confirm": "factory-reset"}, erases the stored configuration and restarts the device,
+ * which brings every module back to its first boot state. The confirmation guards against an
+ * accidental request, the server has no login */
+static esp_err_t factory_reset_post_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    const char *confirm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "confirm"));
+    bool confirmed = confirm != NULL && strcmp(confirm, FACTORY_RESET_CONFIRM) == 0;
+    cJSON_Delete(json);
+
+    if (!confirmed) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Confirm with {\"confirm\": \"" FACTORY_RESET_CONFIRM "\"}");
+    }
+
+    esp_timer_handle_t timer = NULL;
+    const esp_timer_create_args_t timer_args = {
+        .callback = restart_cb,
+        .name     = "factory reset",
+    };
+
+    /* the timer is made first, so the configuration isn't erased on a device that can't restart */
+    if (esp_timer_create(&timer_args, &timer) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not prepare the restart");
+    }
+
+    err = gtg_dev_config_factory_reset();
+    if (err != ESP_OK) {
+        esp_timer_delete(timer);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not erase the configuration");
+    }
+
+    httpd_resp_set_status(req, "202 Accepted");
+    err = httpd_resp_sendstr(req, "Factory reset done, the device restarts");
+
+    /* restarts also when the response couldn't be sent, the configuration is already gone */
+    if (esp_timer_start_once(timer, FACTORY_RESET_RESTART_DELAY_US) != ESP_OK) {
+        esp_restart();
+    }
+
+    return err;
+}
+
 static const httpd_uri_t api_uris[] = {
+    {
+        .uri       = "/api/status",
+        .method    = HTTP_GET,
+        .handler   = status_get_handler,
+    },
     {
         .uri       = "/api/wifi/status",
         .method    = HTTP_GET,
@@ -305,6 +844,53 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/wifi/connect",
         .method    = HTTP_POST,
         .handler   = wifi_connect_post_handler,
+    },
+    {
+        .uri       = "/api/keys/status",
+        .method    = HTTP_GET,
+        .handler   = api_keys_status_get_handler,
+    },
+    {
+        .uri       = "/api/keys/trafiklab",
+        .method    = HTTP_POST,
+        .handler   = api_key_post_handler,
+        .user_ctx  = (void *)&TRAFIKLAB_KEY_ENDPOINT,
+    },
+    {
+        .uri       = "/api/keys/google",
+        .method    = HTTP_POST,
+        .handler   = api_key_post_handler,
+        .user_ctx  = (void *)&GOOGLE_KEY_ENDPOINT,
+    },
+    {
+        .uri       = "/api/stops/search",
+        .method    = HTTP_POST,
+        .handler   = stops_search_post_handler,
+    },
+    {
+        .uri       = "/api/departures/available",
+        .method    = HTTP_POST,
+        .handler   = departures_available_post_handler,
+    },
+    {
+        .uri       = "/api/targets",
+        .method    = HTTP_GET,
+        .handler   = targets_get_handler,
+    },
+    {
+        .uri       = "/api/targets",
+        .method    = HTTP_POST,
+        .handler   = targets_post_handler,
+    },
+    {
+        .uri       = "/api/targets",
+        .method    = HTTP_DELETE,
+        .handler   = targets_delete_handler,
+    },
+    {
+        .uri       = "/api/factory-reset",
+        .method    = HTTP_POST,
+        .handler   = factory_reset_post_handler,
     },
 };
 
@@ -356,6 +942,10 @@ esp_err_t gtg_https_server_init(void)
 
     httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
     conf.httpd.uri_match_fn = httpd_uri_match_wildcard;
+    conf.httpd.max_uri_handlers = sizeof(api_uris) / sizeof(api_uris[0]) + 1;
+
+    /* the API key and stop search handlers make their own TLS connections from the server task */
+    conf.httpd.stack_size = HTTPD_STACK_SIZE;
 
     /* text files are embedded with a NUL terminator, which mbedTLS expects to be included in the PEM length */
     conf.servercert = servercert_start;
