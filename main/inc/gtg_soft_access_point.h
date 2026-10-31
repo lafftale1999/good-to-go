@@ -1,6 +1,7 @@
 #ifndef GTG_SOFT_AP_H_
 #define GTG_SOFT_AP_H_
 
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "esp_err.h"
 
@@ -32,6 +33,19 @@ void wifi_softap_init(wifi_ap_meta_t *wifi_ap_meta);
  * A running station is not affected.
  */
 void wifi_softap_deinit(void);
+
+/**
+ * \brief Whether the AP is started, between wifi_softap_init() and wifi_softap_deinit()
+ */
+bool wifi_softap_is_running(void);
+
+/**
+ * \brief Whether a client is connected to the AP, false when it isn't running
+ *
+ * Doesn't block, so unlike wifi_softap_wait_for_client() it is safe to call while another task
+ * may stop the AP.
+ */
+bool wifi_softap_has_client(void);
 
 /**
  * \brief Blocks until a client is connected to the AP

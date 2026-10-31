@@ -29,11 +29,11 @@ main {
     gap: 16px;
 }
 
-.key-status, #stop-status, #departure-status, #add-status {
+.key-status, #stop-status, #departure-status, #add-status, #done-status {
     margin: 0;
 }
 
-.key-status:empty, #stop-status:empty, #departure-status:empty, #add-status:empty, .options:empty {
+.key-status:empty, #stop-status:empty, #departure-status:empty, #add-status:empty, #done-status:empty, .options:empty {
     display: none;
 }
 

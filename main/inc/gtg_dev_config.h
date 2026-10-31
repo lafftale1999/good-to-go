@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_err.h"
 
 #include "gtg_trafiklab_ds.h"
@@ -23,6 +24,7 @@ typedef enum {
     GTG_DEV_FLAG_TIME_SYNCED    = 1 << 1,   /*!< the clock has been set by NTP */
     GTG_DEV_FLAG_KEYS_VERIFIED  = 1 << 2,   /*!< every API key has been verified this boot */
     GTG_DEV_FLAG_HAS_DEPARTURES = 1 << 3,   /*!< realtime_targets holds at least one target */
+    GTG_DEV_FLAG_VALID_CONFIG   = 1 << 4,   /*!< connected, keys verified and has departures, follows them by itself */
 } gtg_dev_flag_t;
 
 /**
@@ -131,7 +133,10 @@ esp_err_t gtg_dev_config_get_wifi(char *ssid, char *pass);
 /**
  * \brief Sets or clears a runtime flag, a change is logged
  *
- * GTG_DEV_FLAG_HAS_DEPARTURES follows realtime_targets by itself.
+ * GTG_DEV_FLAG_HAS_DEPARTURES follows realtime_targets by itself. GTG_DEV_FLAG_VALID_CONFIG
+ * follows the other flags: it is set while the device is connected, the keys are verified and
+ * it has departures, and cleared as soon as one of them is not. Setting it here is refused.
+ * GTG_EV_CONFIG_APPLIED is posted each time it gets set.
  */
 void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on);
 
@@ -139,6 +144,18 @@ void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on);
  * \brief Returns the gtg_dev_flag_t bits that are set
  */
 uint32_t gtg_dev_config_get_flags(void);
+
+/**
+ * \brief Blocks until all the given gtg_dev_flag_t bits are set
+ *
+ * \param flags  the bits to wait for
+ * \param ticks  maximum time to wait, portMAX_DELAY waits forever
+ *
+ * \return ESP_OK                all the bits are set
+ * \return ESP_ERR_TIMEOUT       not all set within the given time
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_dev_config_wait_flags(uint32_t flags, TickType_t ticks);
 
 /**
  * \brief Stores a verified API key
