@@ -39,7 +39,7 @@ void app_main(void)
     ESP_ERROR_CHECK(gtg_mdns_init());
     ESP_ERROR_CHECK(gtg_https_server_init());
 
-    ESP_ERROR_CHECK(wifi_softap_wait_for_client(pdMS_TO_TICKS(30000)));
+    ESP_ERROR_CHECK(wifi_softap_wait_for_client(pdMS_TO_TICKS(60000)));
 
     /* the user enters the network credentials at goodtogo.local, which connects the station */
     ESP_ERROR_CHECK(wifi_station_wait_connected(portMAX_DELAY));

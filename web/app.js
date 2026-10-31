@@ -9,6 +9,12 @@ const stopsStep = document.getElementById("stops-step");
 const stopForm = document.getElementById("stop-form");
 const stopStatus = document.getElementById("stop-status");
 const stopList = document.getElementById("stops");
+const departuresButton = document.getElementById("find-departures");
+const departureStatus = document.getElementById("departure-status");
+const departureList = document.getElementById("departures");
+
+/* route.transport_mode values from Trafiklab */
+const MODE_NAMES = { BUS: "Bus", METRO: "Metro", TRAIN: "Train", TRAM: "Tram", TAXI: "Taxi", BOAT: "Boat" };
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -211,36 +217,95 @@ function showStopsStep() {
     stopForm.elements.query.focus();
 }
 
-/* stops arrive busiest first as [{"id": "...", "name": "...", "town": "..."}, ...].
- * The id is kept as the option's value and not shown */
+/* A selectable option in an .options list, the value is not shown */
+function optionItem(group, value, text, details) {
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = group;
+    input.value = value;
+
+    const main = document.createElement("span");
+    main.className = "option-text";
+    main.textContent = text;
+
+    const label = document.createElement("label");
+    label.append(input, main);
+
+    if (details) {
+        const extra = document.createElement("span");
+        extra.className = "details";
+        extra.textContent = details;
+        label.append(extra);
+    }
+
+    const item = document.createElement("li");
+    item.append(label);
+    return item;
+}
+
+function clearDepartures() {
+    departureList.replaceChildren();
+    departureStatus.textContent = "";
+}
+
+/* stops arrive busiest first as [{"id": "...", "name": "...", "town": "..."}, ...] */
 function showStops(stops) {
-    const items = stops.map((stop) => {
-        const input = document.createElement("input");
-        input.type = "radio";
-        input.name = "stop";
-        input.value = stop.id;
+    stopList.replaceChildren(...stops.map((stop) => optionItem("stop", stop.id, stop.name, stop.town)));
+    departuresButton.hidden = true;
+    clearDepartures();
+}
 
-        const name = document.createElement("span");
-        name.className = "stop-name";
-        name.textContent = stop.name;
+/* options arrive sorted by line as [{"line": "...", "mode": "...", "destination": "..."}, ...].
+ * The whole option is kept as the value for when the choice is saved */
+function showDepartures(options) {
+    departureList.replaceChildren(...options.map((option) => optionItem(
+        "departure",
+        JSON.stringify(option),
+        `${option.line} ${option.destination}`.trim(),
+        MODE_NAMES[option.mode] ?? option.mode,
+    )));
+}
 
-        const label = document.createElement("label");
-        label.append(input, name);
+/* picking another stop asks for its departures again */
+stopList.addEventListener("change", () => {
+    departuresButton.hidden = false;
+    clearDepartures();
+});
 
-        if (stop.town) {
-            const town = document.createElement("span");
-            town.className = "details";
-            town.textContent = stop.town;
-            label.append(town);
+/* The device reads every departure in the next hour, which takes a few seconds at busy stops */
+departuresButton.addEventListener("click", async () => {
+    const stop = stopList.querySelector("input:checked");
+    if (stop === null) {
+        return;
+    }
+
+    departuresButton.disabled = true;
+    clearDepartures();
+    departureStatus.textContent = "Searching for departures...";
+
+    try {
+        const response = await fetch("/api/departures/available", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stop_id: stop.value }),
+        });
+
+        if (!response.ok) {
+            departureStatus.textContent = await response.text();
+            return;
         }
 
-        const item = document.createElement("li");
-        item.append(label);
-        return item;
-    });
-
-    stopList.replaceChildren(...items);
-}
+        const options = await response.json();
+        showDepartures(options);
+        departureStatus.textContent = options.length === 0
+            ? "No departures in the next hour, try again later or pick another stop."
+            : "Choose the departure to follow.";
+    } catch {
+        departureStatus.textContent = "Could not reach the device, try again.";
+    } finally {
+        departuresButton.disabled = false;
+    }
+});
 
 /* The device asks Trafiklab and then Google for each stop's town, which takes a few seconds */
 stopForm.addEventListener("submit", async (event) => {
@@ -253,7 +318,7 @@ stopForm.addEventListener("submit", async (event) => {
     }
 
     setBusy(stopForm, true);
-    stopList.replaceChildren();
+    showStops([]);
     stopStatus.textContent = "Searching...";
 
     try {

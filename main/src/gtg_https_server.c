@@ -1,6 +1,7 @@
 #include "gtg_https_server.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <stdbool.h>
@@ -14,6 +15,7 @@
 #include "gtg_wifi_station.h"
 #include "gtg_api_keys.h"
 #include "gtg_stop_search.h"
+#include "gtg_departures.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -462,6 +464,90 @@ static esp_err_t stops_search_post_handler(httpd_req_t *req)
     return err;
 }
 
+/* Expects {"stop_id": "..."} and responds with [{"line": "...", "mode": "...", "destination": "..."}, ...],
+ * one per unique departure in the next 60 minutes. Blocks for the length of the request to Trafiklab */
+static esp_err_t departures_available_post_handler(httpd_req_t *req)
+{
+    if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Connect to WiFi first");
+    }
+    if (!gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Verify the Trafiklab key first");
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    /* too large for the server task's stack next to the TLS connection */
+    gtg_departure_option_t *options = malloc(GTG_DEPARTURES_MAX_OPTIONS * sizeof(gtg_departure_option_t));
+    size_t count = 0;
+
+    const char *stop_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "stop_id"));
+    if (options == NULL) {
+        err = ESP_ERR_NO_MEM;
+    } else {
+        err = stop_id != NULL ? gtg_departures_list_options(stop_id, options, &count) : ESP_ERR_INVALID_ARG;
+    }
+    cJSON_Delete(json);
+
+    if (err != ESP_OK) {
+        free(options);
+    }
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop id");
+    }
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "Trafiklab doesn't know this stop, search again");
+    }
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, "Trafiklab rejected the key");
+    }
+    if (err == ESP_ERR_NO_MEM) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "departure lookup failed: %s", esp_err_to_name(err));
+        httpd_resp_set_status(req, "502 Bad Gateway");
+        return httpd_resp_sendstr(req, "Could not fetch departures from Trafiklab, try again");
+    }
+
+    json = cJSON_CreateArray();
+    for (size_t i = 0; json != NULL && i < count; i++) {
+        cJSON *option = cJSON_CreateObject();
+
+        /* once added, the object is freed together with the array */
+        bool ok = option != NULL && cJSON_AddItemToArray(json, option);
+        if (!ok) {
+            cJSON_Delete(option);
+        }
+
+        ok = ok
+            && cJSON_AddStringToObject(option, "line", options[i].line) != NULL
+            && cJSON_AddStringToObject(option, "mode", options[i].mode) != NULL
+            && cJSON_AddStringToObject(option, "destination", options[i].destination) != NULL;
+        if (!ok) {
+            cJSON_Delete(json);
+            json = NULL;
+        }
+    }
+    free(options);
+
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
 static const httpd_uri_t api_uris[] = {
     {
         .uri       = "/api/wifi/status",
@@ -499,6 +585,11 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/stops/search",
         .method    = HTTP_POST,
         .handler   = stops_search_post_handler,
+    },
+    {
+        .uri       = "/api/departures/available",
+        .method    = HTTP_POST,
+        .handler   = departures_available_post_handler,
     },
 };
 

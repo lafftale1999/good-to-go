@@ -12,6 +12,7 @@
 #include "cJSON.h"
 
 #include "gtg_api_keys.h"
+#include "gtg_str.h"
 
 #define API_REQUEST_TIMEOUT_MS  10000
 
@@ -148,21 +149,6 @@ static bool url_encode(const char *in, char *out, size_t out_size)
     return true;
 }
 
-/* Copies a UTF-8 string, cutting a too long one before the character that doesn't fit */
-static void copy_utf8(char *dst, size_t dst_size, const char *src)
-{
-    if (strlcpy(dst, src, dst_size) < dst_size) {
-        return;
-    }
-
-    /* src[end] is the first byte left out, step back while it continues a character */
-    size_t end = dst_size - 1;
-    while (end > 0 && ((unsigned char)src[end] & 0xc0) == 0x80) {
-        end--;
-    }
-    dst[end] = '\0';
-}
-
 /* Inserts the candidate into the list sorted by stop times, busiest first, keeping at most
  * GTG_STOP_SEARCH_MAX_RESULTS. Equal stop times keep Trafiklab's order */
 static void insert_candidate(candidate_t *list, size_t *count, const candidate_t *candidate)
@@ -208,7 +194,7 @@ static bool parse_stop_group(const cJSON *group, candidate_t *candidate)
 
     memset(candidate, 0, sizeof(*candidate));
     strlcpy(candidate->stop.id, id, sizeof(candidate->stop.id));
-    copy_utf8(candidate->stop.name, sizeof(candidate->stop.name), name);
+    gtg_copy_utf8(candidate->stop.name, sizeof(candidate->stop.name), name);
     candidate->stop_times = stop_times->valuedouble;
 
     /* the stops of a group are at the same place, the first one locates it */
@@ -341,7 +327,7 @@ static esp_err_t parse_postal_town(const char *body, char *town, size_t town_siz
         cJSON_ArrayForEach(type, cJSON_GetObjectItemCaseSensitive(component, "types")) {
             const char *type_name = cJSON_GetStringValue(type);
             if (long_name != NULL && type_name != NULL && strcmp(type_name, "postal_town") == 0) {
-                copy_utf8(town, town_size, long_name);
+                gtg_copy_utf8(town, town_size, long_name);
                 cJSON_Delete(json);
                 return ESP_OK;
             }
