@@ -14,8 +14,9 @@
 #include "gtg_ntp.h"
 #include "gtg_https_server.h"
 #include "gtg_mdns.h"
+#include "gtg_api_keys.h"
 
-/* time the softAP stays up after the station has connected */
+/* time the softAP stays up after the configuration is done */
 #define AP_SHUTDOWN_DELAY_MS 30000
 
 static const char *TAG = "main";
@@ -36,6 +37,7 @@ void app_main(void)
     wifi_ap_meta_t ap_cred;
     wifi_softap_init(&ap_cred);
     ESP_ERROR_CHECK(wifi_station_init());
+    ESP_ERROR_CHECK(gtg_api_keys_init());
 
     ESP_ERROR_CHECK(gtg_mdns_init());
     ESP_ERROR_CHECK(gtg_https_server_init());
@@ -44,6 +46,9 @@ void app_main(void)
 
     /* the user enters the network credentials at goodtogo.local, which connects the station */
     ESP_ERROR_CHECK(wifi_station_wait_connected(portMAX_DELAY));
+
+    /* the keys are verified against the services, which needs the station's internet access */
+    ESP_ERROR_CHECK(gtg_api_keys_wait_configured(portMAX_DELAY));
 
     /* give the web page time to show the result before the AP disappears */
     vTaskDelay(pdMS_TO_TICKS(AP_SHUTDOWN_DELAY_MS));

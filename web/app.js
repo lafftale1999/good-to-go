@@ -1,7 +1,10 @@
-const form = document.getElementById("wifi-form");
+const wifiForm = document.getElementById("wifi-form");
 const statusText = document.getElementById("status");
 const scanButton = document.getElementById("scan");
 const networkList = document.getElementById("networks");
+const wifiStep = document.getElementById("wifi-step");
+const keysStep = document.getElementById("keys-step");
+const keyForms = document.querySelectorAll(".key-form");
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -23,7 +26,7 @@ function failureMessage(reason) {
     return `Could not connect (reason ${reason}).`;
 }
 
-function setBusy(busy) {
+function setBusy(form, busy) {
     for (const element of form.elements) {
         element.disabled = busy;
     }
@@ -42,10 +45,10 @@ async function pollStatus() {
     }
 
     if (status.state === "connected") {
-        statusText.textContent = "Connected! You can switch back to your own WiFi.";
+        showKeysStep();
     } else if (status.state === "failed") {
         statusText.textContent = failureMessage(status.reason);
-        setBusy(false);
+        setBusy(wifiForm, false);
     } else {
         setTimeout(pollStatus, POLL_INTERVAL_MS);
     }
@@ -82,8 +85,8 @@ function showNetworks(networks) {
         button.title = `${network.rssi} dBm`;
         button.append(ssid, details);
         button.addEventListener("click", () => {
-            form.elements.ssid.value = network.ssid;
-            form.elements.pass.focus();
+            wifiForm.elements.ssid.value = network.ssid;
+            wifiForm.elements.pass.focus();
         });
 
         const item = document.createElement("li");
@@ -94,7 +97,7 @@ function showNetworks(networks) {
 
 /* The device's access point pauses while scanning, so the request takes a few seconds */
 scanButton.addEventListener("click", async () => {
-    setBusy(true);
+    setBusy(wifiForm, true);
     statusText.textContent = "Scanning...";
 
     try {
@@ -110,15 +113,15 @@ scanButton.addEventListener("click", async () => {
     } catch {
         statusText.textContent = "Scan failed, try again.";
     } finally {
-        setBusy(false);
+        setBusy(wifiForm, false);
     }
 });
 
-form.addEventListener("submit", async (event) => {
+wifiForm.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    const data = new FormData(form);
-    setBusy(true);
+    const data = new FormData(wifiForm);
+    setBusy(wifiForm, true);
     statusText.textContent = "Connecting...";
 
     try {
@@ -130,7 +133,7 @@ form.addEventListener("submit", async (event) => {
 
         if (!response.ok) {
             statusText.textContent = await response.text();
-            setBusy(false);
+            setBusy(wifiForm, false);
             return;
         }
     } catch {
@@ -139,3 +142,73 @@ form.addEventListener("submit", async (event) => {
 
     pollStatus();
 });
+
+/* keys holds {"trafiklab": bool, "google": bool} as returned by /api/keys/status */
+function showKeysVerified(keys) {
+    for (const keyForm of keyForms) {
+        if (keys[keyForm.dataset.service]) {
+            keyForm.querySelector(".key-status").textContent = "✓ Key verified";
+        }
+    }
+
+    if (Object.values(keys).every(Boolean)) {
+        statusText.textContent = "All set! You can switch back to your own WiFi.";
+    }
+}
+
+async function showKeysStep() {
+    wifiStep.hidden = true;
+    keysStep.hidden = false;
+    statusText.textContent = "";
+
+    try {
+        const response = await fetch("/api/keys/status", { cache: "no-store" });
+        showKeysVerified(await response.json());
+    } catch {
+        /* nothing verified is shown, the keys can still be added */
+    }
+}
+
+/* The device checks the key with a request to the service, which takes a few seconds */
+for (const keyForm of keyForms) {
+    const keyStatus = keyForm.querySelector(".key-status");
+
+    keyForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        setBusy(keyForm, true);
+        keyStatus.textContent = "Verifying...";
+
+        try {
+            const response = await fetch(`/api/keys/${keyForm.dataset.service}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ key: keyForm.elements.key.value.trim() }),
+            });
+
+            if (!response.ok) {
+                keyStatus.textContent = await response.text();
+                return;
+            }
+
+            showKeysVerified(await response.json());
+        } catch {
+            keyStatus.textContent = "Could not reach the device, try again.";
+        } finally {
+            setBusy(keyForm, false);
+        }
+    });
+}
+
+/* a reload after the WiFi step continues with the keys */
+(async () => {
+    try {
+        const response = await fetch("/api/wifi/status", { cache: "no-store" });
+        const status = await response.json();
+        if (status.state === "connected") {
+            showKeysStep();
+        }
+    } catch {
+        /* stay on the WiFi step */
+    }
+})();

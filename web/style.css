@@ -10,9 +10,26 @@ body {
     place-items: center;
 }
 
+[hidden] {
+    display: none !important;
+}
+
 main {
     padding: 0 16px;
     text-align: center;
+}
+
+#keys-step {
+    display: grid;
+    gap: 24px;
+}
+
+.key-status {
+    margin: 0;
+}
+
+.key-status:empty {
+    display: none;
 }
 
 form {

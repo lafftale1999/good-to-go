@@ -12,6 +12,7 @@
 #include "cJSON.h"
 
 #include "gtg_wifi_station.h"
+#include "gtg_api_keys.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -21,6 +22,7 @@
 #define FILE_CHUNK_SIZE       1024
 #define API_BODY_MAX_LEN      256
 #define WIFI_SCAN_MAX_RESULTS 10
+#define HTTPD_STACK_SIZE      16384
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
 
 static const char *TAG = "https server";
@@ -189,15 +191,15 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
     return send_wifi_status(req, "200 OK");
 }
 
-/* Expects {"ssid": "...", "pass": "..."} and starts connecting without waiting for the
- * result, as the softAP can drop for a moment when it moves to the router's channel.
- * The result is polled through /api/wifi/status */
-static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
+/* Receives and parses a JSON body. On NULL the error response has been sent and
+ * *err holds the handler's return value */
+static cJSON *receive_json(httpd_req_t *req, esp_err_t *err)
 {
     char body[API_BODY_MAX_LEN + 1];
 
     if (req->content_len == 0 || req->content_len > API_BODY_MAX_LEN) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        *err = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        return NULL;
     }
 
     size_t received = 0;
@@ -207,7 +209,8 @@ static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
             continue;
         }
         if (ret <= 0) {
-            return ESP_FAIL;
+            *err = ESP_FAIL;
+            return NULL;
         }
         received += ret;
     }
@@ -215,17 +218,31 @@ static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
 
     cJSON *json = cJSON_Parse(body);
 
-    /* the body contains the password */
+    /* the body can contain passwords and keys */
     memset(body, 0, sizeof(body));
 
     if (json == NULL) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        *err = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    }
+
+    return json;
+}
+
+/* Expects {"ssid": "...", "pass": "..."} and starts connecting without waiting for the
+ * result, as the softAP can drop for a moment when it moves to the router's channel.
+ * The result is polled through /api/wifi/status */
+static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
     }
 
     const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "ssid"));
     char *pass = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "pass"));
 
-    esp_err_t err = wifi_station_connect(ssid, pass);
+    err = wifi_station_connect(ssid, pass);
 
     if (pass != NULL) {
         memset(pass, 0, strlen(pass));
@@ -290,6 +307,89 @@ static esp_err_t wifi_scan_get_handler(httpd_req_t *req)
     return err;
 }
 
+/* Responds with {"trafiklab": true|false, "google": true|false}, true once a verified key is stored */
+static esp_err_t send_api_keys_status(httpd_req_t *req)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL
+        || cJSON_AddBoolToObject(json, "trafiklab", gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB)) == NULL
+        || cJSON_AddBoolToObject(json, "google", gtg_api_keys_is_set(GTG_API_KEY_GOOGLE)) == NULL) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t api_keys_status_get_handler(httpd_req_t *req)
+{
+    return send_api_keys_status(req);
+}
+
+typedef struct {
+    gtg_api_key_t key;
+    const char *name;
+    const char *rejected_msg;
+} api_key_endpoint_t;
+
+static const api_key_endpoint_t TRAFIKLAB_KEY_ENDPOINT = {
+    .key          = GTG_API_KEY_TRAFIKLAB,
+    .name         = "Trafiklab",
+    .rejected_msg = "Trafiklab rejected the key, check that it is correct",
+};
+
+static const api_key_endpoint_t GOOGLE_KEY_ENDPOINT = {
+    .key          = GTG_API_KEY_GOOGLE,
+    .name         = "Google",
+    .rejected_msg = "Google rejected the key, check that it is correct and that the Geocoding API is enabled for it",
+};
+
+/* Expects {"key": "..."}, verifies the key with a request to the service and stores it
+ * when it works. Blocks for the length of that request. Responds like /api/keys/status */
+static esp_err_t api_key_post_handler(httpd_req_t *req)
+{
+    const api_key_endpoint_t *endpoint = req->user_ctx;
+
+    if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Connect to WiFi first");
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    char *key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "key"));
+    err = key != NULL ? gtg_api_keys_set(endpoint->key, key) : ESP_ERR_INVALID_ARG;
+
+    if (key != NULL) {
+        memset(key, 0, strlen(key));
+    }
+    cJSON_Delete(json);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        _Static_assert(GTG_API_KEY_MAX_LEN == 64, "update the message below");
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "The key must be 1-64 letters, digits, '-' or '_'");
+    }
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, endpoint->rejected_msg);
+    }
+    if (err != ESP_OK) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Could not verify the key with %s, try again", endpoint->name);
+        httpd_resp_set_status(req, "502 Bad Gateway");
+        return httpd_resp_sendstr(req, msg);
+    }
+
+    return send_api_keys_status(req);
+}
+
 static const httpd_uri_t api_uris[] = {
     {
         .uri       = "/api/wifi/status",
@@ -305,6 +405,23 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/wifi/connect",
         .method    = HTTP_POST,
         .handler   = wifi_connect_post_handler,
+    },
+    {
+        .uri       = "/api/keys/status",
+        .method    = HTTP_GET,
+        .handler   = api_keys_status_get_handler,
+    },
+    {
+        .uri       = "/api/keys/trafiklab",
+        .method    = HTTP_POST,
+        .handler   = api_key_post_handler,
+        .user_ctx  = (void *)&TRAFIKLAB_KEY_ENDPOINT,
+    },
+    {
+        .uri       = "/api/keys/google",
+        .method    = HTTP_POST,
+        .handler   = api_key_post_handler,
+        .user_ctx  = (void *)&GOOGLE_KEY_ENDPOINT,
     },
 };
 
@@ -356,6 +473,10 @@ esp_err_t gtg_https_server_init(void)
 
     httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
     conf.httpd.uri_match_fn = httpd_uri_match_wildcard;
+    conf.httpd.max_uri_handlers = sizeof(api_uris) / sizeof(api_uris[0]) + 1;
+
+    /* the API key handlers make their own TLS connection from the server task */
+    conf.httpd.stack_size = HTTPD_STACK_SIZE;
 
     /* text files are embedded with a NUL terminator, which mbedTLS expects to be included in the PEM length */
     conf.servercert = servercert_start;

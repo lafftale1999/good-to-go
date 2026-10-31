@@ -16,6 +16,14 @@
  * WiFi configuration API, see gtg_wifi_station.h:
  *  - POST /api/wifi/connect {"ssid": "...", "pass": "..."} starts connecting the station
  *  - GET  /api/wifi/status  returns {"state": "idle|connecting|connected|failed", "reason": n}
+ *  - GET  /api/wifi/scan    returns [{"ssid": "...", "rssi": n, "secure": bool}, ...], strongest first
+ *
+ * API key configuration, see gtg_api_keys.h. Keys can only be added once the station is connected:
+ *  - POST /api/keys/trafiklab {"key": "..."} verifies and stores the Trafiklab key
+ *  - POST /api/keys/google    {"key": "..."} verifies and stores the Google key
+ *  - GET  /api/keys/status    returns {"trafiklab": bool, "google": bool}
+ *
+ * gtg_api_keys_init() must have been called before keys are added.
  *
  * The network interface must be up, e.g. through wifi_softap_init() or
  * wifi_station_init().

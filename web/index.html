@@ -9,19 +9,40 @@
 <body>
     <main>
         <h1>Good to go</h1>
-        <form id="wifi-form">
-            <button type="button" id="scan">Scan for networks</button>
-            <ul id="networks"></ul>
-            <label>
-                Network name
-                <input name="ssid" required maxlength="32" autocomplete="off">
-            </label>
-            <label>
-                Password
-                <input name="pass" type="password" required minlength="8" maxlength="63">
-            </label>
-            <button type="submit">Connect</button>
-        </form>
+        <section id="wifi-step">
+            <form id="wifi-form">
+                <button type="button" id="scan">Scan for networks</button>
+                <ul id="networks"></ul>
+                <label>
+                    Network name
+                    <input name="ssid" required maxlength="32" autocomplete="off">
+                </label>
+                <label>
+                    Password
+                    <input name="pass" type="password" required minlength="8" maxlength="63">
+                </label>
+                <button type="submit">Connect</button>
+            </form>
+        </section>
+        <section id="keys-step" hidden>
+            <p>Connected to WiFi. Now add your API keys.</p>
+            <form class="key-form" data-service="trafiklab">
+                <label>
+                    Trafiklab API key
+                    <input name="key" required maxlength="64" pattern="[A-Za-z0-9_\-]+" autocomplete="off" spellcheck="false">
+                </label>
+                <button type="submit">Verify</button>
+                <p class="key-status" role="status"></p>
+            </form>
+            <form class="key-form" data-service="google">
+                <label>
+                    Google API key
+                    <input name="key" required maxlength="64" pattern="[A-Za-z0-9_\-]+" autocomplete="off" spellcheck="false">
+                </label>
+                <button type="submit">Verify</button>
+                <p class="key-status" role="status"></p>
+            </form>
+        </section>
         <p id="status" role="status"></p>
     </main>
     <script src="/app.js"></script>
