@@ -10,6 +10,7 @@ idf_component_register(
         "src/gtg_api_keys.c"
         "src/gtg_stop_search.c"
         "src/gtg_departures.c"
+        "src/gtg_dev_config.c"
         "lib/cJSON/cJSON.c"
 
     PRIV_REQUIRES

@@ -4,13 +4,14 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#include "gtg_departures.h"
+#include "gtg_stop_search.h"
+
+
+
 typedef struct _trafiklab_target_ {
-    char stop_id[10];
-    char area_name[50];
-    char stop_name[50];
-    char *transport_modes[10];
-    char line_designation[10];
-    char destination[100];
+    gtg_stop_t              stop;
+    gtg_departure_option_t  departure;
 } trafiklab_target_t;
 
 typedef struct _trafiklab_target_list_ {

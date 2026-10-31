@@ -12,6 +12,7 @@
 #include "cJSON.h"
 
 #include "gtg_api_keys.h"
+#include "gtg_dev_config.h"
 #include "gtg_str.h"
 #include "gtg_stop_search.h"
 #include "gtg_ntp.h"
@@ -342,7 +343,7 @@ esp_err_t gtg_departures_list_options(const char *stop_id, gtg_departure_option_
     ESP_RETURN_ON_ERROR(next_sample_day(&day), TAG, "the clock is not set");
 
     char key[GTG_API_KEY_MAX_LEN + 1];
-    if (gtg_api_keys_get(GTG_API_KEY_TRAFIKLAB, key, sizeof(key)) != ESP_OK) {
+    if (gtg_dev_config_get_api_key(GTG_API_KEY_TRAFIKLAB, key, sizeof(key)) != ESP_OK) {
         return ESP_ERR_INVALID_STATE;
     }
 

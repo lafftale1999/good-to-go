@@ -12,6 +12,7 @@
 #include "cJSON.h"
 
 #include "gtg_api_keys.h"
+#include "gtg_dev_config.h"
 #include "gtg_str.h"
 
 #define API_REQUEST_TIMEOUT_MS  10000
@@ -240,7 +241,7 @@ static esp_err_t parse_stop_groups(const char *body, candidate_t *candidates, si
 static esp_err_t search_trafiklab(const char *query, candidate_t *candidates, size_t *count)
 {
     char key[GTG_API_KEY_MAX_LEN + 1];
-    if (gtg_api_keys_get(GTG_API_KEY_TRAFIKLAB, key, sizeof(key)) != ESP_OK) {
+    if (gtg_dev_config_get_api_key(GTG_API_KEY_TRAFIKLAB, key, sizeof(key)) != ESP_OK) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -343,7 +344,7 @@ static esp_err_t parse_postal_town(const char *body, char *town, size_t town_siz
 static void resolve_towns(candidate_t *candidates, size_t count)
 {
     char key[GTG_API_KEY_MAX_LEN + 1];
-    if (gtg_api_keys_get(GTG_API_KEY_GOOGLE, key, sizeof(key)) != ESP_OK) {
+    if (gtg_dev_config_get_api_key(GTG_API_KEY_GOOGLE, key, sizeof(key)) != ESP_OK) {
         ESP_LOGW(TAG, "no Google key, towns are not resolved");
         return;
     }

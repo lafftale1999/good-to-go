@@ -15,6 +15,7 @@
 #include "gtg_https_server.h"
 #include "gtg_mdns.h"
 #include "gtg_api_keys.h"
+#include "gtg_dev_config.h"
 
 static const char *TAG = "main";
 
@@ -30,6 +31,9 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* the station and the key verification store what the user configures here */
+    ESP_ERROR_CHECK(gtg_dev_config_init());
 
     wifi_ap_meta_t ap_cred;
     wifi_softap_init(&ap_cred);

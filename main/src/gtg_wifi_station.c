@@ -11,6 +11,8 @@
 #include "esp_log.h"
 #include "esp_check.h"
 
+#include "gtg_dev_config.h"
+
 #define WIFI_STA_MAXIMUM_RETRY     5
 
 #define WIFI_STA_SSID_MAX_LEN      32
@@ -35,6 +37,30 @@ static bool s_sta_enabled = false;
 static volatile wifi_station_state_t s_state = WIFI_STATION_IDLE;
 static volatile uint8_t s_last_reason = 0;
 static int s_retry_num = 0;
+
+/* Stores the credentials the driver connected with in the device configuration, so only
+ * credentials that work end up there */
+static void store_connected_credentials(void)
+{
+    wifi_config_t wifi_config;
+    if (esp_wifi_get_config(WIFI_IF_STA, &wifi_config) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to read the connected credentials");
+        return;
+    }
+
+    /* ssid and password are not NUL terminated when they use the full field length */
+    char ssid[GTG_DEV_CONFIG_SSID_MAX_LEN + 1] = { 0 };
+    char pass[GTG_DEV_CONFIG_PASS_MAX_LEN + 1] = { 0 };
+    memcpy(ssid, wifi_config.sta.ssid, strnlen((const char *)wifi_config.sta.ssid, sizeof(ssid) - 1));
+    memcpy(pass, wifi_config.sta.password, strnlen((const char *)wifi_config.sta.password, sizeof(pass) - 1));
+
+    if (gtg_dev_config_set_wifi(ssid, pass) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to store the connected credentials");
+    }
+
+    memset(&wifi_config, 0, sizeof(wifi_config));
+    memset(pass, 0, sizeof(pass));
+}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                     int32_t event_id, void* event_data)
@@ -66,6 +92,10 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         s_last_reason = 0;
+
+        /* before the state changes, so the configuration has them once the connection is reported */
+        store_connected_credentials();
+
         s_state = WIFI_STATION_CONNECTED;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }

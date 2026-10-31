@@ -15,9 +15,10 @@ typedef enum {
 } gtg_api_key_t;
 
 /**
- * \brief Prepares the key storage, must be called once before the other functions
+ * \brief Prepares the key verification, must be called once before the other functions
  *
- * The keys are only kept in RAM.
+ * Verified keys are stored in the device configuration, see gtg_dev_config.h, which must
+ * have been initialized. Requests read them from there with gtg_dev_config_get_api_key().
  *
  * \return ESP_OK                ready
  * \return ESP_ERR_INVALID_STATE already initialized
@@ -26,7 +27,7 @@ typedef enum {
 esp_err_t gtg_api_keys_init(void);
 
 /**
- * \brief Verifies a key with a request to its service and stores it when it works
+ * \brief Verifies a key with a request to its service and stores it in the device configuration when it works
  *
  * Blocks for the length of the request, at most around 10 seconds. The station
  * must be connected to a network with internet access.
@@ -47,20 +48,6 @@ esp_err_t gtg_api_keys_set(gtg_api_key_t which, const char *key);
  * \brief Returns whether a verified key is stored for the service
  */
 bool gtg_api_keys_is_set(gtg_api_key_t which);
-
-/**
- * \brief Copies a stored key
- *
- * \param which     the service the key belongs to
- * \param *out      receives the NUL terminated key
- * \param out_size  size of out, GTG_API_KEY_MAX_LEN + 1 always fits
- *
- * \return ESP_OK              key copied
- * \return ESP_ERR_INVALID_ARG unknown service or out is NULL
- * \return ESP_ERR_NOT_FOUND   no key stored for the service
- * \return ESP_ERR_INVALID_SIZE out is too small
- */
-esp_err_t gtg_api_keys_get(gtg_api_key_t which, char *out, size_t out_size);
 
 /**
  * \brief Blocks until a verified key is stored for every service

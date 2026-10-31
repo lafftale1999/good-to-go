@@ -6,12 +6,13 @@
 #include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
-#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
+
+#include "gtg_dev_config.h"
 
 #define API_REQUEST_TIMEOUT_MS  10000
 #define API_URL_MAX_LEN         256
@@ -28,8 +29,6 @@
 static const char *TAG = "api keys";
 
 static EventGroupHandle_t s_event_group = NULL;
-static SemaphoreHandle_t s_keys_mutex = NULL;
-static char s_keys[GTG_API_KEY_COUNT][GTG_API_KEY_MAX_LEN + 1];
 
 /* Sends a GET request. When body is given the response body is read into it and NUL terminated */
 static esp_err_t http_get(const char *url, int *status, char *body, size_t body_size)
@@ -182,15 +181,8 @@ esp_err_t gtg_api_keys_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_keys_mutex = xSemaphoreCreateMutex();
-    if (s_keys_mutex == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
     s_event_group = xEventGroupCreate();
     if (s_event_group == NULL) {
-        vSemaphoreDelete(s_keys_mutex);
-        s_keys_mutex = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -216,9 +208,7 @@ esp_err_t gtg_api_keys_set(gtg_api_key_t which, const char *key)
         return err;
     }
 
-    xSemaphoreTake(s_keys_mutex, portMAX_DELAY);
-    strlcpy(s_keys[which], key, sizeof(s_keys[which]));
-    xSemaphoreGive(s_keys_mutex);
+    ESP_RETURN_ON_ERROR(gtg_dev_config_set_api_key(which, key), TAG, "failed to store the %s key", service->name);
 
     xEventGroupSetBits(s_event_group, BIT(which));
 
@@ -234,23 +224,6 @@ bool gtg_api_keys_is_set(gtg_api_key_t which)
     }
 
     return (xEventGroupGetBits(s_event_group) & BIT(which)) != 0;
-}
-
-esp_err_t gtg_api_keys_get(gtg_api_key_t which, char *out, size_t out_size)
-{
-    if (!is_valid_service(which) || out == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (!gtg_api_keys_is_set(which)) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    xSemaphoreTake(s_keys_mutex, portMAX_DELAY);
-    size_t len = strlcpy(out, s_keys[which], out_size);
-    xSemaphoreGive(s_keys_mutex);
-
-    return len < out_size ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }
 
 esp_err_t gtg_api_keys_wait_configured(TickType_t ticks)

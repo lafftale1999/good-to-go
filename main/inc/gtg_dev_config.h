@@ -1,24 +1,84 @@
 #ifndef GTG_DEV_CONFIG_H_
 #define GTG_DEV_CONFIG_H_
 
+#include <stddef.h>
+#include <time.h>
+#include "esp_err.h"
+
 #include "gtg_trafiklab_ds.h"
+#include "gtg_api_keys.h"
 
-typedef struct api_key {
-    char   *key;
-    size_t  len;
-} api_key_t;
+#define GTG_DEV_CONFIG_SSID_MAX_LEN 32
+#define GTG_DEV_CONFIG_PASS_MAX_LEN 63
 
+/**
+ * The runtime configuration of the device. It is only kept in RAM for now, a later version
+ * saves it to NVS. The single instance is owned by this module and reached through the
+ * functions below, which copy values in and out under a lock, as it is used from several tasks.
+ */
 typedef struct _gtg_dev_config_ {
-    char                    wifi_ssid[33];
-    char                    wifi_pass[64];
-    uint8_t                 wifi_is_connected;
+    char                    wifi_ssid[GTG_DEV_CONFIG_SSID_MAX_LEN + 1];
+    char                    wifi_pass[GTG_DEV_CONFIG_PASS_MAX_LEN + 1];
 
-    int64_t                 last_changed;
+    /* local time of the last change, 0 when it happened before the clock was set by NTP */
+    time_t                  last_changed;
 
     trafiklab_target_list_t realtime_targets;
 
-    api_key_t               trafiklab_api_key;
-    api_key_t               google_maps_api_key;
+    char                    trafiklab_api_key[GTG_API_KEY_MAX_LEN + 1];
+    char                    google_maps_api_key[GTG_API_KEY_MAX_LEN + 1];
 } gtg_dev_config_t;
+
+/**
+ * \brief Prepares the empty configuration, must be called once before the other functions
+ *
+ * \return ESP_OK                ready
+ * \return ESP_ERR_INVALID_STATE already initialized
+ * \return ESP_ERR_NO_MEM        out of memory
+ */
+esp_err_t gtg_dev_config_init(void);
+
+/**
+ * \brief Stores the credentials of the WiFi network the station connected to
+ *
+ * last_changed is only updated when they differ from the stored ones.
+ *
+ * \param *ssid  1-GTG_DEV_CONFIG_SSID_MAX_LEN characters
+ * \param *pass  0-GTG_DEV_CONFIG_PASS_MAX_LEN characters
+ *
+ * \return ESP_OK                stored
+ * \return ESP_ERR_INVALID_ARG   NULL, empty or too long
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_dev_config_set_wifi(const char *ssid, const char *pass);
+
+/**
+ * \brief Stores a verified API key
+ *
+ * last_changed is only updated when it differs from the stored one.
+ *
+ * \param which the service the key belongs to
+ * \param *key  1-GTG_API_KEY_MAX_LEN characters
+ *
+ * \return ESP_OK                stored
+ * \return ESP_ERR_INVALID_ARG   unknown service, NULL, empty or too long
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_dev_config_set_api_key(gtg_api_key_t which, const char *key);
+
+/**
+ * \brief Copies a stored API key
+ *
+ * \param which     the service the key belongs to
+ * \param *out      receives the NUL terminated key
+ * \param out_size  size of out, GTG_API_KEY_MAX_LEN + 1 always fits
+ *
+ * \return ESP_OK                key copied
+ * \return ESP_ERR_INVALID_ARG   unknown service or out is NULL
+ * \return ESP_ERR_NOT_FOUND     no key stored for the service
+ * \return ESP_ERR_INVALID_SIZE  out is too small
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_dev_config_get_api_key(gtg_api_key_t which, char *out, size_t out_size);
 
 #endif
