@@ -11,6 +11,7 @@ idf_component_register(
         "src/gtg_stop_search.c"
         "src/gtg_departures.c"
         "src/gtg_dev_config.c"
+        "src/gtg_lcd.c"
         "lib/cJSON/cJSON.c"
 
     PRIV_REQUIRES
@@ -23,6 +24,7 @@ idf_component_register(
         lwip
         nvs_flash
         esp_timer
+        lcd_screen
 
     EMBED_TXTFILES
         "../cred/servercert.pem"
