@@ -29,11 +29,11 @@ main {
     gap: 16px;
 }
 
-.key-status, #stop-status, #departure-status {
+.key-status, #stop-status, #departure-status, #add-status {
     margin: 0;
 }
 
-.key-status:empty, #stop-status:empty, #departure-status:empty, .options:empty {
+.key-status:empty, #stop-status:empty, #departure-status:empty, #add-status:empty, .options:empty {
     display: none;
 }
 
@@ -59,6 +59,12 @@ main {
 
 .options label:has(input:checked) {
     border-color: currentColor;
+}
+
+/* departures already tracked */
+.options label:has(input:disabled) {
+    cursor: default;
+    opacity: 0.6;
 }
 
 .options .option-text {

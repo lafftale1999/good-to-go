@@ -16,6 +16,7 @@
 #include "gtg_api_keys.h"
 #include "gtg_stop_search.h"
 #include "gtg_departures.h"
+#include "gtg_dev_config.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -23,7 +24,8 @@
 #define WWW_GZIP_SUFFIX       ".gz"
 
 #define FILE_CHUNK_SIZE       1024
-#define API_BODY_MAX_LEN      256
+/* fits a target from /api/targets with every field at its full length */
+#define API_BODY_MAX_LEN      512
 #define WIFI_SCAN_MAX_RESULTS 10
 #define HTTPD_STACK_SIZE      16384
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
@@ -465,8 +467,9 @@ static esp_err_t stops_search_post_handler(httpd_req_t *req)
 }
 
 /* Expects {"stop_id": "..."} and responds with
- * {"options": [{"line": "...", "mode": "...", "destination": "..."}, ...], "samples": 8, "failed": n},
- * one option per unique departure during a whole day. Blocks for the length of the requests to Trafiklab */
+ * {"options": [{"line": "...", "mode": "...", "destination": "...", "tracked": bool}, ...], "samples": 8, "failed": n},
+ * one option per unique departure during a whole day, tracked when it is in realtime_targets.
+ * Blocks for the length of the requests to Trafiklab */
 static esp_err_t departures_available_post_handler(httpd_req_t *req)
 {
     if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
@@ -489,11 +492,16 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
     size_t count = 0;
     size_t failed = 0;
 
-    const char *stop_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "stop_id"));
+    /* kept past the request body for marking the tracked options */
+    char stop_id[GTG_STOP_ID_MAX_LEN + 1] = "";
+    const char *requested_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "stop_id"));
+
     if (options == NULL) {
         err = ESP_ERR_NO_MEM;
+    } else if (requested_id == NULL || strlcpy(stop_id, requested_id, sizeof(stop_id)) >= sizeof(stop_id)) {
+        err = ESP_ERR_INVALID_ARG;
     } else {
-        err = stop_id != NULL ? gtg_departures_list_options(stop_id, options, &count, &failed) : ESP_ERR_INVALID_ARG;
+        err = gtg_departures_list_options(stop_id, options, &count, &failed);
     }
     cJSON_Delete(json);
 
@@ -545,7 +553,8 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
         ok = ok
             && cJSON_AddStringToObject(option, "line", options[i].line) != NULL
             && cJSON_AddStringToObject(option, "mode", options[i].mode) != NULL
-            && cJSON_AddStringToObject(option, "destination", options[i].destination) != NULL;
+            && cJSON_AddStringToObject(option, "destination", options[i].destination) != NULL
+            && cJSON_AddBoolToObject(option, "tracked", gtg_dev_config_has_target(stop_id, &options[i])) != NULL;
         if (!ok) {
             cJSON_Delete(json);
             json = NULL;
@@ -558,6 +567,97 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
     }
 
     err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
+/* Copies a string member into a fixed field. False when it is missing, too long or holds control
+ * characters, or when it is empty and required */
+static bool copy_json_string(const cJSON *object, const char *name, char *field, size_t field_size, bool required)
+{
+    const char *value = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, name));
+    if (value == NULL || (required && value[0] == '\0')) {
+        return false;
+    }
+
+    for (const char *c = value; *c != '\0'; c++) {
+        if ((unsigned char)*c < 0x20 || *c == 0x7f) {
+            return false;
+        }
+    }
+
+    return strlcpy(field, value, field_size) < field_size;
+}
+
+static bool is_digits(const char *s)
+{
+    for (; *s != '\0'; s++) {
+        if (*s < '0' || *s > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Expects {"stop": {"id": "...", "name": "...", "town": "..."},
+ *          "departure": {"line": "...", "mode": "...", "destination": "..."}}
+ * as returned by /api/stops/search and /api/departures/available, adds it to realtime_targets
+ * and responds with {"count": n, "max": 8} */
+static esp_err_t targets_post_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    const cJSON *stop = cJSON_GetObjectItemCaseSensitive(json, "stop");
+    const cJSON *departure = cJSON_GetObjectItemCaseSensitive(json, "departure");
+
+    trafiklab_target_t target = { 0 };
+    bool valid = copy_json_string(stop, "id", target.stop.id, sizeof(target.stop.id), true)
+        && is_digits(target.stop.id)
+        && copy_json_string(stop, "name", target.stop.name, sizeof(target.stop.name), true)
+        && copy_json_string(stop, "town", target.stop.town, sizeof(target.stop.town), false)
+        && copy_json_string(departure, "line", target.departure.line, sizeof(target.departure.line), false)
+        && copy_json_string(departure, "mode", target.departure.mode, sizeof(target.departure.mode), true)
+        && copy_json_string(departure, "destination", target.departure.destination,
+                            sizeof(target.departure.destination), true);
+    cJSON_Delete(json);
+
+    if (!valid) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+    }
+
+    size_t count = 0;
+    err = gtg_dev_config_add_target(&target, &count);
+
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "This departure is already tracked");
+    }
+    if (err == ESP_ERR_INVALID_SIZE) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "You can track at most %d departures", GTG_DEV_CONFIG_MAX_TARGETS);
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, msg);
+    }
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not add the departure");
+    }
+
+    json = cJSON_CreateObject();
+    if (json == NULL
+        || cJSON_AddNumberToObject(json, "count", count) == NULL
+        || cJSON_AddNumberToObject(json, "max", GTG_DEV_CONFIG_MAX_TARGETS) == NULL) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    err = send_json(req, "201 Created", json);
     cJSON_Delete(json);
     return err;
 }
@@ -604,6 +704,11 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/departures/available",
         .method    = HTTP_POST,
         .handler   = departures_available_post_handler,
+    },
+    {
+        .uri       = "/api/targets",
+        .method    = HTTP_POST,
+        .handler   = targets_post_handler,
     },
 };
 

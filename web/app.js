@@ -12,6 +12,12 @@ const stopList = document.getElementById("stops");
 const departuresButton = document.getElementById("find-departures");
 const departureStatus = document.getElementById("departure-status");
 const departureList = document.getElementById("departures");
+const addButton = document.getElementById("add-departure");
+const addStatus = document.getElementById("add-status");
+
+/* the stops of the last search by id, and the stop whose departures are listed */
+let stopsById = new Map();
+let departuresStop = null;
 
 /* route.transport_mode values from Trafiklab */
 const MODE_NAMES = { BUS: "Bus", METRO: "Metro", TRAIN: "Train", TRAM: "Tram", TAXI: "Taxi", BOAT: "Boat" };
@@ -246,30 +252,90 @@ function optionItem(group, value, text, details) {
 function clearDepartures() {
     departureList.replaceChildren();
     departureStatus.textContent = "";
+    addButton.hidden = true;
+    addStatus.textContent = "";
 }
 
 /* stops arrive busiest first as [{"id": "...", "name": "...", "town": "..."}, ...] */
 function showStops(stops) {
+    stopsById = new Map(stops.map((stop) => [stop.id, stop]));
     stopList.replaceChildren(...stops.map((stop) => optionItem("stop", stop.id, stop.name, stop.town)));
     departuresButton.hidden = true;
     clearDepartures();
 }
 
-/* options arrive sorted by mode, line and destination as [{"line": "...", "mode": "...", "destination": "..."}, ...].
- * The whole option is kept as the value for when the choice is saved */
+function departureText(departure) {
+    return `${departure.line} ${departure.destination}`.trim();
+}
+
+/* A tracked departure can't be picked again */
+function markTracked(input) {
+    input.checked = false;
+    input.disabled = true;
+    input.closest("label").querySelector(".details").textContent = "✓ Tracked";
+}
+
+/* options arrive sorted by mode, line and destination as
+ * [{"line": "...", "mode": "...", "destination": "...", "tracked": bool}, ...].
+ * The departure is kept as the value for adding it */
 function showDepartures(options) {
-    departureList.replaceChildren(...options.map((option) => optionItem(
-        "departure",
-        JSON.stringify(option),
-        `${option.line} ${option.destination}`.trim(),
-        MODE_NAMES[option.mode] ?? option.mode,
-    )));
+    departureList.replaceChildren(...options.map((option) => {
+        const departure = { line: option.line, mode: option.mode, destination: option.destination };
+        const item = optionItem("departure", JSON.stringify(departure), departureText(departure),
+                                MODE_NAMES[option.mode] ?? option.mode);
+        if (option.tracked) {
+            markTracked(item.querySelector("input"));
+        }
+        return item;
+    }));
 }
 
 /* picking another stop asks for its departures again */
 stopList.addEventListener("change", () => {
     departuresButton.hidden = false;
     clearDepartures();
+});
+
+/* tracked departures are disabled, so any picked one can be added */
+departureList.addEventListener("change", () => {
+    addButton.hidden = false;
+    addStatus.textContent = "";
+});
+
+addButton.addEventListener("click", async () => {
+    const input = departureList.querySelector("input:checked");
+    if (input === null || departuresStop === null) {
+        return;
+    }
+
+    const departure = JSON.parse(input.value);
+    addButton.disabled = true;
+    addStatus.textContent = "Adding...";
+
+    try {
+        const response = await fetch("/api/targets", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stop: departuresStop, departure }),
+        });
+
+        if (!response.ok) {
+            addStatus.textContent = await response.text();
+            return;
+        }
+
+        /* {"count": n, "max": n} */
+        const result = await response.json();
+        const mode = MODE_NAMES[departure.mode] ?? departure.mode;
+        addStatus.textContent = `Added ${mode} ${departureText(departure)} from ${departuresStop.name} `
+                              + `(${result.count} of ${result.max}).`;
+        markTracked(input);
+        addButton.hidden = true;
+    } catch {
+        addStatus.textContent = "Could not reach the device, try again.";
+    } finally {
+        addButton.disabled = false;
+    }
 });
 
 /* The device samples the departures of a whole Wednesday with 8 requests, which can take up to a minute */
@@ -281,6 +347,7 @@ departuresButton.addEventListener("click", async () => {
 
     departuresButton.disabled = true;
     clearDepartures();
+    departuresStop = stopsById.get(stop.value) ?? null;
     departureStatus.textContent = "Searching the day's departures, this can take up to a minute...";
 
     try {

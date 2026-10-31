@@ -29,7 +29,11 @@
  * Departure configuration, see gtg_departures.h. Needs the station connected, the Trafiklab key verified
  * and the clock set:
  *  - POST /api/departures/available {"stop_id": "..."} returns
- *    {"options": [{"line": "...", "mode": "...", "destination": "..."}, ...], "samples": n, "failed": n}
+ *    {"options": [{"line": "...", "mode": "...", "destination": "...", "tracked": bool}, ...], "samples": n, "failed": n}
+ *
+ * Tracked departures, see gtg_dev_config.h:
+ *  - POST /api/targets {"stop": {"id", "name", "town"}, "departure": {"line", "mode", "destination"}}
+ *    adds the departure to realtime_targets and returns {"count": n, "max": n}
  *
  * gtg_api_keys_init() must have been called before keys are added.
  *
