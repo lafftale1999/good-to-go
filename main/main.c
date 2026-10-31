@@ -18,14 +18,53 @@
 #include "gtg_api_keys.h"
 #include "gtg_dev_config.h"
 #include "gtg_lcd.h"
+#include "gtg_events.h"
 
 /* the station retries 5 times, which ends well within this */
 #define BOOT_WIFI_TIMEOUT_MS    60000
 #define NTP_SYNC_TIMEOUT_MS     30000
 
+#define EVENT_TASK_STACK_SIZE   3072
+#define EVENT_TASK_PRIORITY     5
+
 static const char *TAG = "main";
 
 static gtg_lcd_module_t s_lcd;
+
+static void log_event(const gtg_event_t *event)
+{
+    switch (event->type) {
+    case GTG_EV_CONNECTION_CHANGED:
+        ESP_LOGI(TAG, "event: %s, %s (reason %u)", gtg_event_type_name(event->type),
+                 event->wifi.connected ? "connected" : "disconnected", event->wifi.reason);
+        break;
+    case GTG_EV_API_KEY_REJECTED:
+        ESP_LOGI(TAG, "event: %s, %s", gtg_event_type_name(event->type),
+                 event->api_key.which == GTG_API_KEY_TRAFIKLAB ? "Trafiklab" : "Google");
+        break;
+    case GTG_EV_BUTTON_PRESSED:
+    case GTG_EV_BUTTON_HOLD:
+        ESP_LOGI(TAG, "event: %s, button %u", gtg_event_type_name(event->type), event->button.id);
+        break;
+    default:
+        ESP_LOGW(TAG, "event: unknown type %d", event->type);
+        break;
+    }
+}
+
+/* Consumes the events the modules post. It runs in its own task, as the main task blocks while
+ * waiting for the configuration. The events are only logged for now, this is where the device's
+ * reactions to them go */
+static void event_task(void *arg)
+{
+    gtg_event_t event;
+
+    while (true) {
+        if (gtg_events_receive(&event, portMAX_DELAY) == ESP_OK) {
+            log_event(&event);
+        }
+    }
+}
 
 /* Connects with the stored credentials. False when none are stored or the retries fail */
 static bool connect_stored_wifi(void)
@@ -96,6 +135,12 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* before anything that posts, so even the first connection is seen */
+    ESP_ERROR_CHECK(gtg_events_init());
+    if (xTaskCreate(event_task, "gtg events", EVENT_TASK_STACK_SIZE, NULL, EVENT_TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
 
     /* the device works without the screen, so a missing one is only logged */
     if (gtg_lcd_init(&s_lcd) == ESP_OK) {

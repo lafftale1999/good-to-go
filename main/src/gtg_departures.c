@@ -14,6 +14,7 @@
 #include "gtg_api_keys.h"
 #include "gtg_dev_config.h"
 #include "gtg_str.h"
+#include "gtg_events.h"
 #include "gtg_stop_search.h"
 #include "gtg_ntp.h"
 
@@ -318,6 +319,8 @@ static esp_err_t fetch_sample(esp_http_client_handle_t client, const char *url, 
         return ESP_ERR_NOT_FOUND;
     }
     if (status == 401 || status == 403) {
+        /* the search stops on this, so it is posted once per search */
+        gtg_events_post_key_rejected(GTG_API_KEY_TRAFIKLAB);
         return ESP_ERR_NOT_ALLOWED;
     }
     if (status != 200 || stream->depth != 0 || stream->in_string) {

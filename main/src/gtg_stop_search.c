@@ -14,6 +14,7 @@
 #include "gtg_api_keys.h"
 #include "gtg_dev_config.h"
 #include "gtg_str.h"
+#include "gtg_events.h"
 
 #define API_REQUEST_TIMEOUT_MS  10000
 
@@ -284,6 +285,7 @@ static esp_err_t search_trafiklab(const char *query, candidate_t *candidates, si
             /* no stop matches the name */
         } else if (status == 401 || status == 403) {
             err = ESP_ERR_NOT_ALLOWED;
+            gtg_events_post_key_rejected(GTG_API_KEY_TRAFIKLAB);
         } else if (status != 200) {
             err = ESP_ERR_INVALID_RESPONSE;
         } else {
@@ -306,7 +308,11 @@ static esp_err_t parse_postal_town(const char *body, char *town, size_t town_siz
         err = ESP_ERR_INVALID_RESPONSE;
     } else if (strcmp(status, "OK") == 0 || strcmp(status, "ZERO_RESULTS") == 0) {
         err = ESP_OK;
-    } else if (strcmp(status, "REQUEST_DENIED") == 0 || strcmp(status, "OVER_QUERY_LIMIT") == 0) {
+    } else if (strcmp(status, "REQUEST_DENIED") == 0) {
+        err = ESP_ERR_NOT_ALLOWED;
+        gtg_events_post_key_rejected(GTG_API_KEY_GOOGLE);
+    } else if (strcmp(status, "OVER_QUERY_LIMIT") == 0) {
+        /* the quota is used up, the key itself is fine. The other lookups would fail the same way */
         err = ESP_ERR_NOT_ALLOWED;
     } else {
         err = ESP_ERR_INVALID_RESPONSE;
