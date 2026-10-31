@@ -43,6 +43,18 @@
                 <p class="key-status" role="status"></p>
             </form>
         </section>
+        <section id="stops-step" hidden>
+            <p>API keys verified. Now search for the stop you want to follow.</p>
+            <form id="stop-form">
+                <label>
+                    Stop name
+                    <input name="query" required maxlength="64" autocomplete="off" placeholder="e.g. Sveavägen">
+                </label>
+                <button type="submit">Search</button>
+            </form>
+            <p id="stop-status" role="status"></p>
+            <ul id="stops"></ul>
+        </section>
         <p id="status" role="status"></p>
     </main>
     <script src="/app.js"></script>

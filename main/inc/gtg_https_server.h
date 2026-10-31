@@ -23,6 +23,9 @@
  *  - POST /api/keys/google    {"key": "..."} verifies and stores the Google key
  *  - GET  /api/keys/status    returns {"trafiklab": bool, "google": bool}
  *
+ * Stop configuration, see gtg_stop_search.h. Needs the station connected and both keys verified:
+ *  - POST /api/stops/search {"query": "..."} returns [{"id": "...", "name": "...", "town": "..."}, ...]
+ *
  * gtg_api_keys_init() must have been called before keys are added.
  *
  * The network interface must be up, e.g. through wifi_softap_init() or

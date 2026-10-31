@@ -13,6 +13,7 @@
 
 #include "gtg_wifi_station.h"
 #include "gtg_api_keys.h"
+#include "gtg_stop_search.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -390,6 +391,77 @@ static esp_err_t api_key_post_handler(httpd_req_t *req)
     return send_api_keys_status(req);
 }
 
+/* Expects {"query": "..."} and responds with [{"id": "...", "name": "...", "town": "..."}, ...],
+ * busiest first. Blocks for the length of the requests to Trafiklab and Google */
+static esp_err_t stops_search_post_handler(httpd_req_t *req)
+{
+    if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Connect to WiFi first");
+    }
+    if (!gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB) || !gtg_api_keys_is_set(GTG_API_KEY_GOOGLE)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Verify both API keys first");
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    gtg_stop_t stops[GTG_STOP_SEARCH_MAX_RESULTS];
+    size_t count = 0;
+
+    const char *query = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "query"));
+    err = query != NULL ? gtg_stop_search(query, stops, &count) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(json);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Enter a stop name of at most 64 characters");
+    }
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, "Trafiklab rejected the key");
+    }
+    if (err == ESP_ERR_INVALID_SIZE) {
+        httpd_resp_set_status(req, "422 Unprocessable Content");
+        return httpd_resp_sendstr(req, "Too many stops match, try a more specific name");
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "stop search failed: %s", esp_err_to_name(err));
+        httpd_resp_set_status(req, "502 Bad Gateway");
+        return httpd_resp_sendstr(req, "Could not search Trafiklab, try again");
+    }
+
+    json = cJSON_CreateArray();
+    for (size_t i = 0; json != NULL && i < count; i++) {
+        cJSON *stop = cJSON_CreateObject();
+
+        /* once added, the object is freed together with the array */
+        bool ok = stop != NULL && cJSON_AddItemToArray(json, stop);
+        if (!ok) {
+            cJSON_Delete(stop);
+        }
+
+        ok = ok
+            && cJSON_AddStringToObject(stop, "id", stops[i].id) != NULL
+            && cJSON_AddStringToObject(stop, "name", stops[i].name) != NULL
+            && cJSON_AddStringToObject(stop, "town", stops[i].town) != NULL;
+        if (!ok) {
+            cJSON_Delete(json);
+            json = NULL;
+        }
+    }
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    err = send_json(req, "200 OK", json);
+    cJSON_Delete(json);
+    return err;
+}
+
 static const httpd_uri_t api_uris[] = {
     {
         .uri       = "/api/wifi/status",
@@ -422,6 +494,11 @@ static const httpd_uri_t api_uris[] = {
         .method    = HTTP_POST,
         .handler   = api_key_post_handler,
         .user_ctx  = (void *)&GOOGLE_KEY_ENDPOINT,
+    },
+    {
+        .uri       = "/api/stops/search",
+        .method    = HTTP_POST,
+        .handler   = stops_search_post_handler,
     },
 };
 
@@ -475,7 +552,7 @@ esp_err_t gtg_https_server_init(void)
     conf.httpd.uri_match_fn = httpd_uri_match_wildcard;
     conf.httpd.max_uri_handlers = sizeof(api_uris) / sizeof(api_uris[0]) + 1;
 
-    /* the API key handlers make their own TLS connection from the server task */
+    /* the API key and stop search handlers make their own TLS connections from the server task */
     conf.httpd.stack_size = HTTPD_STACK_SIZE;
 
     /* text files are embedded with a NUL terminator, which mbedTLS expects to be included in the PEM length */

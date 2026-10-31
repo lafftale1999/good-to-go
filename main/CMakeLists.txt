@@ -8,6 +8,7 @@ idf_component_register(
         "src/gtg_https_server.c"
         "src/gtg_mdns.c"
         "src/gtg_api_keys.c"
+        "src/gtg_stop_search.c"
         "lib/cJSON/cJSON.c"
 
     PRIV_REQUIRES

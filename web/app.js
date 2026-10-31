@@ -5,6 +5,10 @@ const networkList = document.getElementById("networks");
 const wifiStep = document.getElementById("wifi-step");
 const keysStep = document.getElementById("keys-step");
 const keyForms = document.querySelectorAll(".key-form");
+const stopsStep = document.getElementById("stops-step");
+const stopForm = document.getElementById("stop-form");
+const stopStatus = document.getElementById("stop-status");
+const stopList = document.getElementById("stops");
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -152,7 +156,7 @@ function showKeysVerified(keys) {
     }
 
     if (Object.values(keys).every(Boolean)) {
-        statusText.textContent = "All set! You can switch back to your own WiFi.";
+        showStopsStep();
     }
 }
 
@@ -200,7 +204,81 @@ for (const keyForm of keyForms) {
     });
 }
 
-/* a reload after the WiFi step continues with the keys */
+function showStopsStep() {
+    keysStep.hidden = true;
+    stopsStep.hidden = false;
+    statusText.textContent = "";
+    stopForm.elements.query.focus();
+}
+
+/* stops arrive busiest first as [{"id": "...", "name": "...", "town": "..."}, ...].
+ * The id is kept as the option's value and not shown */
+function showStops(stops) {
+    const items = stops.map((stop) => {
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = "stop";
+        input.value = stop.id;
+
+        const name = document.createElement("span");
+        name.className = "stop-name";
+        name.textContent = stop.name;
+
+        const label = document.createElement("label");
+        label.append(input, name);
+
+        if (stop.town) {
+            const town = document.createElement("span");
+            town.className = "details";
+            town.textContent = stop.town;
+            label.append(town);
+        }
+
+        const item = document.createElement("li");
+        item.append(label);
+        return item;
+    });
+
+    stopList.replaceChildren(...items);
+}
+
+/* The device asks Trafiklab and then Google for each stop's town, which takes a few seconds */
+stopForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const query = stopForm.elements.query.value.trim();
+    if (query === "") {
+        stopStatus.textContent = "Enter a stop name.";
+        return;
+    }
+
+    setBusy(stopForm, true);
+    stopList.replaceChildren();
+    stopStatus.textContent = "Searching...";
+
+    try {
+        const response = await fetch("/api/stops/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query }),
+        });
+
+        if (!response.ok) {
+            stopStatus.textContent = await response.text();
+            return;
+        }
+
+        const stops = await response.json();
+        showStops(stops);
+        stopStatus.textContent = stops.length === 0 ? "No stops found, try another name." : "";
+    } catch {
+        stopStatus.textContent = "Could not reach the device, try again.";
+    } finally {
+        setBusy(stopForm, false);
+    }
+});
+
+/* a reload after the WiFi step continues with the keys, or the stops once the keys are verified */
 (async () => {
     try {
         const response = await fetch("/api/wifi/status", { cache: "no-store" });
