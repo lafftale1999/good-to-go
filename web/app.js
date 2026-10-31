@@ -15,6 +15,36 @@ const departureList = document.getElementById("departures");
 const addButton = document.getElementById("add-departure");
 const addStatus = document.getElementById("add-status");
 
+/* Collapses an .options list to the picked item when one is picked. The other items are only
+ * hidden, so the button below the list shows them again without asking the device */
+function collapsible(list, button, singular, plural) {
+    function expand() {
+        for (const item of list.children) {
+            item.hidden = false;
+        }
+        button.hidden = true;
+    }
+
+    function collapseTo(picked) {
+        const others = [...list.children].filter((item) => item !== picked);
+        for (const item of others) {
+            item.hidden = true;
+        }
+        button.textContent = `Show ${others.length} more ${others.length === 1 ? singular : plural}`;
+        button.hidden = others.length === 0;
+    }
+
+    button.addEventListener("click", expand);
+    list.addEventListener("change", (event) => collapseTo(event.target.closest("li")));
+
+    /* called after the list is filled anew, which starts it expanded */
+    return { reset: () => { button.hidden = true; } };
+}
+
+const stopCollapse = collapsible(stopList, document.getElementById("more-stops"), "stop", "stops");
+const departureCollapse = collapsible(departureList, document.getElementById("more-departures"),
+                                      "departure", "departures");
+
 /* the stops of the last search by id, and the stop whose departures are listed */
 let stopsById = new Map();
 let departuresStop = null;
@@ -251,6 +281,7 @@ function optionItem(group, value, text, details) {
 
 function clearDepartures() {
     departureList.replaceChildren();
+    departureCollapse.reset();
     departureStatus.textContent = "";
     addButton.hidden = true;
     addStatus.textContent = "";
@@ -260,6 +291,7 @@ function clearDepartures() {
 function showStops(stops) {
     stopsById = new Map(stops.map((stop) => [stop.id, stop]));
     stopList.replaceChildren(...stops.map((stop) => optionItem("stop", stop.id, stop.name, stop.town)));
+    stopCollapse.reset();
     departuresButton.hidden = true;
     clearDepartures();
 }
@@ -288,6 +320,7 @@ function showDepartures(options) {
         }
         return item;
     }));
+    departureCollapse.reset();
 }
 
 /* picking another stop asks for its departures again */

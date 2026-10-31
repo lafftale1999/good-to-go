@@ -61,6 +61,17 @@ main {
     border-color: currentColor;
 }
 
+/* expands a collapsed .options list, styled as a link so it doesn't read as a next step */
+.show-more {
+    justify-self: start;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
 /* departures already tracked */
 .options label:has(input:disabled) {
     cursor: default;
