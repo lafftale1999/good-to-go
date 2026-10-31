@@ -255,7 +255,7 @@ function showStops(stops) {
     clearDepartures();
 }
 
-/* options arrive sorted by line as [{"line": "...", "mode": "...", "destination": "..."}, ...].
+/* options arrive sorted by mode, line and destination as [{"line": "...", "mode": "...", "destination": "..."}, ...].
  * The whole option is kept as the value for when the choice is saved */
 function showDepartures(options) {
     departureList.replaceChildren(...options.map((option) => optionItem(
@@ -272,7 +272,7 @@ stopList.addEventListener("change", () => {
     clearDepartures();
 });
 
-/* The device reads every departure in the next hour, which takes a few seconds at busy stops */
+/* The device samples the departures of a whole Wednesday with 8 requests, which can take up to a minute */
 departuresButton.addEventListener("click", async () => {
     const stop = stopList.querySelector("input:checked");
     if (stop === null) {
@@ -281,7 +281,7 @@ departuresButton.addEventListener("click", async () => {
 
     departuresButton.disabled = true;
     clearDepartures();
-    departureStatus.textContent = "Searching for departures...";
+    departureStatus.textContent = "Searching the day's departures, this can take up to a minute...";
 
     try {
         const response = await fetch("/api/departures/available", {
@@ -295,11 +295,16 @@ departuresButton.addEventListener("click", async () => {
             return;
         }
 
-        const options = await response.json();
-        showDepartures(options);
-        departureStatus.textContent = options.length === 0
-            ? "No departures in the next hour, try again later or pick another stop."
-            : "Choose the departure to follow.";
+        /* {"options": [...], "samples": 8, "failed": n} */
+        const result = await response.json();
+        showDepartures(result.options);
+
+        const incomplete = result.failed > 0
+            ? ` ${result.failed} of ${result.samples} samples failed, the list may be incomplete.`
+            : "";
+        departureStatus.textContent = result.options.length === 0
+            ? `No departures found from this stop on a Wednesday.${incomplete}`
+            : `Choose the departure to follow.${incomplete}`;
     } catch {
         departureStatus.textContent = "Could not reach the device, try again.";
     } finally {

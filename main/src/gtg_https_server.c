@@ -464,8 +464,9 @@ static esp_err_t stops_search_post_handler(httpd_req_t *req)
     return err;
 }
 
-/* Expects {"stop_id": "..."} and responds with [{"line": "...", "mode": "...", "destination": "..."}, ...],
- * one per unique departure in the next 60 minutes. Blocks for the length of the request to Trafiklab */
+/* Expects {"stop_id": "..."} and responds with
+ * {"options": [{"line": "...", "mode": "...", "destination": "..."}, ...], "samples": 8, "failed": n},
+ * one option per unique departure during a whole day. Blocks for the length of the requests to Trafiklab */
 static esp_err_t departures_available_post_handler(httpd_req_t *req)
 {
     if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
@@ -486,12 +487,13 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
     /* too large for the server task's stack next to the TLS connection */
     gtg_departure_option_t *options = malloc(GTG_DEPARTURES_MAX_OPTIONS * sizeof(gtg_departure_option_t));
     size_t count = 0;
+    size_t failed = 0;
 
     const char *stop_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "stop_id"));
     if (options == NULL) {
         err = ESP_ERR_NO_MEM;
     } else {
-        err = stop_id != NULL ? gtg_departures_list_options(stop_id, options, &count) : ESP_ERR_INVALID_ARG;
+        err = stop_id != NULL ? gtg_departures_list_options(stop_id, options, &count, &failed) : ESP_ERR_INVALID_ARG;
     }
     cJSON_Delete(json);
 
@@ -500,6 +502,10 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
     }
     if (err == ESP_ERR_INVALID_ARG) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop id");
+    }
+    if (err == ESP_ERR_NOT_FINISHED) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "The device clock isn't set yet, try again in a moment");
     }
     if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_set_status(req, "404 Not Found");
@@ -518,12 +524,20 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "Could not fetch departures from Trafiklab, try again");
     }
 
-    json = cJSON_CreateArray();
+    json = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(json, "options");
+    if (list == NULL
+        || cJSON_AddNumberToObject(json, "samples", GTG_DEPARTURES_SAMPLES) == NULL
+        || cJSON_AddNumberToObject(json, "failed", failed) == NULL) {
+        cJSON_Delete(json);
+        json = NULL;
+    }
+
     for (size_t i = 0; json != NULL && i < count; i++) {
         cJSON *option = cJSON_CreateObject();
 
-        /* once added, the object is freed together with the array */
-        bool ok = option != NULL && cJSON_AddItemToArray(json, option);
+        /* once added, the object is freed together with the response */
+        bool ok = option != NULL && cJSON_AddItemToArray(list, option);
         if (!ok) {
             cJSON_Delete(option);
         }

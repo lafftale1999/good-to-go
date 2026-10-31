@@ -44,12 +44,8 @@ void app_main(void)
     /* the user enters the network credentials at goodtogo.local, which connects the station */
     ESP_ERROR_CHECK(wifi_station_wait_connected(portMAX_DELAY));
 
-    /* the keys are verified against the services, which needs the station's internet access */
-    ESP_ERROR_CHECK(gtg_api_keys_wait_configured(portMAX_DELAY));
-
-    /* The softAP stays up while the user picks stops at goodtogo.local. It is shut down
-     * once the configuration has a final step to wait for */
-
+    /* the departure search needs the date, so the clock is set as soon as there is internet access.
+     * The keys can be added meanwhile, the server runs in its own task */
     ESP_ERROR_CHECK(gtg_ntp_init());
 
     if (gtg_ntp_wait_for_sync(30000) == ESP_OK) {
@@ -58,4 +54,10 @@ void app_main(void)
             ESP_LOGI(TAG, "Swedish time: %s", time_str);
         }
     }
+
+    /* the keys are verified against the services, which needs the station's internet access */
+    ESP_ERROR_CHECK(gtg_api_keys_wait_configured(portMAX_DELAY));
+
+    /* The softAP stays up while the user picks stops at goodtogo.local. It is shut down
+     * once the configuration has a final step to wait for */
 }

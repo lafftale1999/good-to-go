@@ -26,8 +26,10 @@
  * Stop configuration, see gtg_stop_search.h. Needs the station connected and both keys verified:
  *  - POST /api/stops/search {"query": "..."} returns [{"id": "...", "name": "...", "town": "..."}, ...]
  *
- * Departure configuration, see gtg_departures.h. Needs the station connected and the Trafiklab key verified:
- *  - POST /api/departures/available {"stop_id": "..."} returns [{"line": "...", "mode": "...", "destination": "..."}, ...]
+ * Departure configuration, see gtg_departures.h. Needs the station connected, the Trafiklab key verified
+ * and the clock set:
+ *  - POST /api/departures/available {"stop_id": "..."} returns
+ *    {"options": [{"line": "...", "mode": "...", "destination": "..."}, ...], "samples": n, "failed": n}
  *
  * gtg_api_keys_init() must have been called before keys are added.
  *
