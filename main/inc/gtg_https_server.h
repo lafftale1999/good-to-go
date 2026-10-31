@@ -36,6 +36,8 @@
  *                                            "departure": {"line", "mode", "destination"}}, ...], "max": n}
  *  - POST /api/targets {"stop": {...}, "departure": {...}} adds the departure to realtime_targets
  *    and returns like GET
+ *  - DELETE /api/targets {"stop_id": "...", "departure": {...}} removes the departure from
+ *    realtime_targets and returns like GET
  *
  * gtg_api_keys_init() must have been called before keys are added.
  *

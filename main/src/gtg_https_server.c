@@ -706,6 +706,44 @@ static esp_err_t targets_post_handler(httpd_req_t *req)
     return send_targets(req, "201 Created");
 }
 
+/* Expects {"stop_id": "...", "departure": {"line": "...", "mode": "...", "destination": "..."}},
+ * removes that target from realtime_targets and responds like GET /api/targets. The target is
+ * named by its content rather than its place, which can change from another tab */
+static esp_err_t targets_delete_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    const cJSON *departure = cJSON_GetObjectItemCaseSensitive(json, "departure");
+
+    char stop_id[GTG_STOP_ID_MAX_LEN + 1] = "";
+    gtg_departure_option_t option = { 0 };
+    bool valid = copy_json_string(json, "stop_id", stop_id, sizeof(stop_id), true)
+        && copy_json_string(departure, "line", option.line, sizeof(option.line), false)
+        && copy_json_string(departure, "mode", option.mode, sizeof(option.mode), true)
+        && copy_json_string(departure, "destination", option.destination, sizeof(option.destination), true);
+    cJSON_Delete(json);
+
+    if (!valid) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+    }
+
+    err = gtg_dev_config_remove_target(stop_id, &option);
+
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "This departure is no longer tracked");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not remove the departure");
+    }
+
+    return send_targets(req, "200 OK");
+}
+
 static const httpd_uri_t api_uris[] = {
     {
         .uri       = "/api/wifi/status",
@@ -758,6 +796,11 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/targets",
         .method    = HTTP_POST,
         .handler   = targets_post_handler,
+    },
+    {
+        .uri       = "/api/targets",
+        .method    = HTTP_DELETE,
+        .handler   = targets_delete_handler,
     },
 };
 

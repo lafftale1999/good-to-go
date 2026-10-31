@@ -182,8 +182,8 @@ static bool is_valid_target(const trafiklab_target_t *target)
         && is_terminated(departure->destination, sizeof(departure->destination), true);
 }
 
-/* Called with the lock held */
-static bool find_target(const char *stop_id, const gtg_departure_option_t *departure)
+/* Index of the target, or -1 when it is not tracked. Called with the lock held */
+static int target_index(const char *stop_id, const gtg_departure_option_t *departure)
 {
     const trafiklab_target_list_t *targets = &s_config.realtime_targets;
 
@@ -194,11 +194,17 @@ static bool find_target(const char *stop_id, const gtg_departure_option_t *depar
             && strcmp(target->departure.line, departure->line) == 0
             && strcmp(target->departure.mode, departure->mode) == 0
             && strcmp(target->departure.destination, departure->destination) == 0) {
-            return true;
+            return (int)i;
         }
     }
 
-    return false;
+    return -1;
+}
+
+/* Called with the lock held */
+static bool find_target(const char *stop_id, const gtg_departure_option_t *departure)
+{
+    return target_index(stop_id, departure) >= 0;
 }
 
 esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *count)
@@ -241,6 +247,49 @@ esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *co
     }
 
     return err;
+}
+
+esp_err_t gtg_dev_config_remove_target(const char *stop_id, const gtg_departure_option_t *departure)
+{
+    if (stop_id == NULL || departure == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_mutex == NULL) {
+        ESP_LOGE(TAG, "not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    trafiklab_target_list_t *targets = &s_config.realtime_targets;
+    int index = target_index(stop_id, departure);
+
+    trafiklab_target_t removed = { 0 };
+    if (index >= 0) {
+        removed = targets->list[index];
+
+        /* the ones after it move up, so the order they were added in stays */
+        memmove(&targets->list[index], &targets->list[index + 1],
+                (targets->len - index - 1) * sizeof(targets->list[0]));
+        targets->len--;
+        memset(&targets->list[targets->len], 0, sizeof(targets->list[0]));
+        mark_changed();
+    }
+
+    size_t len = targets->len;
+
+    xSemaphoreGive(s_mutex);
+
+    if (index < 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "stopped tracking %s %s %s from %s (%s), %u of %d",
+             removed.departure.mode, removed.departure.line, removed.departure.destination,
+             removed.stop.name, removed.stop.id, (unsigned)len, GTG_DEV_CONFIG_MAX_TARGETS);
+
+    return ESP_OK;
 }
 
 esp_err_t gtg_dev_config_get_targets(trafiklab_target_t *out, size_t max, size_t *count)

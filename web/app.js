@@ -16,6 +16,7 @@ const addButton = document.getElementById("add-departure");
 const addStatus = document.getElementById("add-status");
 const savedCount = document.getElementById("saved-count");
 const savedList = document.getElementById("saved-list");
+const savedStatus = document.getElementById("saved-status");
 
 /* Collapses an .options list to the picked item when one is picked. The other items are only
  * hidden, so the button below the list shows them again without asking the device */
@@ -265,18 +266,78 @@ function showSaved(saved) {
         : `${count}/${saved.max} departures`;
 
     savedList.replaceChildren(...saved.targets.map(({ stop, departure }) => {
+        const description = `${MODE_NAMES[departure.mode] ?? departure.mode} ${departureText(departure)}`;
+
         const text = document.createElement("span");
         text.className = "saved-text";
-        text.textContent = `${MODE_NAMES[departure.mode] ?? departure.mode} ${departureText(departure)}`;
+        text.textContent = description;
 
         const where = document.createElement("span");
         where.className = "details";
         where.textContent = stop.town ? `${stop.name}, ${stop.town}` : stop.name;
 
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "remove";
+        remove.textContent = "✕";
+        remove.title = "Remove";
+        remove.setAttribute("aria-label", `Remove ${description} from ${stop.name}`);
+        remove.addEventListener("click", () => removeSaved(remove, stop, departure));
+
         const item = document.createElement("li");
-        item.append(text, where);
+        item.append(text, where, remove);
         return item;
     }));
+}
+
+function sameDeparture(a, b) {
+    return a.line === b.line && a.mode === b.mode && a.destination === b.destination;
+}
+
+/* A departure that is no longer tracked can be picked again from the listed departures */
+function unmarkTracked(stop, departure) {
+    if (departuresStop === null || departuresStop.id !== stop.id) {
+        return;
+    }
+
+    for (const input of departureList.querySelectorAll("input")) {
+        if (sameDeparture(JSON.parse(input.value), departure)) {
+            input.disabled = false;
+            input.closest("label").querySelector(".details").textContent =
+                MODE_NAMES[departure.mode] ?? departure.mode;
+        }
+    }
+}
+
+async function removeSaved(button, stop, departure) {
+    button.disabled = true;
+    savedStatus.textContent = "";
+
+    try {
+        const response = await fetch("/api/targets", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stop_id: stop.id, departure }),
+        });
+
+        if (!response.ok) {
+            savedStatus.textContent = await response.text();
+            button.disabled = false;
+
+            /* removed elsewhere, show what the device has */
+            if (response.status === 404) {
+                loadSaved();
+            }
+            return;
+        }
+
+        /* the saved departures after removing, like GET /api/targets */
+        showSaved(await response.json());
+        unmarkTracked(stop, departure);
+    } catch {
+        savedStatus.textContent = "Could not reach the device, try again.";
+        button.disabled = false;
+    }
 }
 
 async function loadSaved() {
