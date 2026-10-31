@@ -103,6 +103,20 @@ esp_err_t gtg_dev_config_get_api_key(gtg_api_key_t which, char *out, size_t out_
 esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *count);
 
 /**
+ * \brief Copies realtime_targets in the order they were added
+ *
+ * \param *out      receives the targets, room for GTG_DEV_CONFIG_MAX_TARGETS always fits
+ * \param max       number of targets out has room for
+ * \param *count    receives the number of targets copied
+ *
+ * \return ESP_OK                targets copied, *count can be 0
+ * \return ESP_ERR_INVALID_ARG   out or count is NULL
+ * \return ESP_ERR_INVALID_SIZE  more targets than max, the first max are copied
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_dev_config_get_targets(trafiklab_target_t *out, size_t max, size_t *count);
+
+/**
  * \brief Returns whether the departure from the stop is in realtime_targets
  */
 bool gtg_dev_config_has_target(const char *stop_id, const gtg_departure_option_t *departure);

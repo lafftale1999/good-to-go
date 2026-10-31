@@ -14,6 +14,8 @@ const departureStatus = document.getElementById("departure-status");
 const departureList = document.getElementById("departures");
 const addButton = document.getElementById("add-departure");
 const addStatus = document.getElementById("add-status");
+const savedCount = document.getElementById("saved-count");
+const savedList = document.getElementById("saved-list");
 
 /* Collapses an .options list to the picked item when one is picked. The other items are only
  * hidden, so the button below the list shows them again without asking the device */
@@ -251,6 +253,43 @@ function showStopsStep() {
     stopsStep.hidden = false;
     statusText.textContent = "";
     stopForm.elements.query.focus();
+    loadSaved();
+}
+
+/* saved holds {"targets": [{"stop": {...}, "departure": {...}}, ...], "max": n} as returned
+ * by GET and POST /api/targets, in the order the departures were added */
+function showSaved(saved) {
+    const count = saved.targets.length;
+    savedCount.textContent = count === 0
+        ? "No departures have been added."
+        : `${count}/${saved.max} departures`;
+
+    savedList.replaceChildren(...saved.targets.map(({ stop, departure }) => {
+        const text = document.createElement("span");
+        text.className = "saved-text";
+        text.textContent = `${MODE_NAMES[departure.mode] ?? departure.mode} ${departureText(departure)}`;
+
+        const where = document.createElement("span");
+        where.className = "details";
+        where.textContent = stop.town ? `${stop.name}, ${stop.town}` : stop.name;
+
+        const item = document.createElement("li");
+        item.append(text, where);
+        return item;
+    }));
+}
+
+async function loadSaved() {
+    try {
+        const response = await fetch("/api/targets", { cache: "no-store" });
+        if (response.ok) {
+            showSaved(await response.json());
+            return;
+        }
+    } catch {
+        /* falls through to the message below */
+    }
+    savedCount.textContent = "Could not load the saved departures.";
 }
 
 /* A selectable option in an .options list, the value is not shown */
@@ -357,11 +396,13 @@ addButton.addEventListener("click", async () => {
             return;
         }
 
-        /* {"count": n, "max": n} */
-        const result = await response.json();
+        /* the saved departures after adding, like GET /api/targets */
+        const saved = await response.json();
+        showSaved(saved);
+
         const mode = MODE_NAMES[departure.mode] ?? departure.mode;
         addStatus.textContent = `Added ${mode} ${departureText(departure)} from ${departuresStop.name} `
-                              + `(${result.count} of ${result.max}).`;
+                              + `(${saved.targets.length} of ${saved.max}).`;
         markTracked(input);
         addButton.hidden = true;
     } catch {

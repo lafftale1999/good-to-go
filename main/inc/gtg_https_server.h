@@ -32,8 +32,10 @@
  *    {"options": [{"line": "...", "mode": "...", "destination": "...", "tracked": bool}, ...], "samples": n, "failed": n}
  *
  * Tracked departures, see gtg_dev_config.h:
- *  - POST /api/targets {"stop": {"id", "name", "town"}, "departure": {"line", "mode", "destination"}}
- *    adds the departure to realtime_targets and returns {"count": n, "max": n}
+ *  - GET  /api/targets returns {"targets": [{"stop": {"id", "name", "town"},
+ *                                            "departure": {"line", "mode", "destination"}}, ...], "max": n}
+ *  - POST /api/targets {"stop": {...}, "departure": {...}} adds the departure to realtime_targets
+ *    and returns like GET
  *
  * gtg_api_keys_init() must have been called before keys are added.
  *

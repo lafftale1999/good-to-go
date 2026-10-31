@@ -599,10 +599,65 @@ static bool is_digits(const char *s)
     return true;
 }
 
+/* Adds {"id", "name", "town"} of the stop and {"line", "mode", "destination"} of the departure */
+static bool add_target_json(cJSON *list, const trafiklab_target_t *target)
+{
+    cJSON *item = cJSON_CreateObject();
+
+    /* once added, the object is freed together with the list */
+    if (item == NULL || !cJSON_AddItemToArray(list, item)) {
+        cJSON_Delete(item);
+        return false;
+    }
+
+    cJSON *stop = cJSON_AddObjectToObject(item, "stop");
+    cJSON *departure = cJSON_AddObjectToObject(item, "departure");
+
+    return stop != NULL && departure != NULL
+        && cJSON_AddStringToObject(stop, "id", target->stop.id) != NULL
+        && cJSON_AddStringToObject(stop, "name", target->stop.name) != NULL
+        && cJSON_AddStringToObject(stop, "town", target->stop.town) != NULL
+        && cJSON_AddStringToObject(departure, "line", target->departure.line) != NULL
+        && cJSON_AddStringToObject(departure, "mode", target->departure.mode) != NULL
+        && cJSON_AddStringToObject(departure, "destination", target->departure.destination) != NULL;
+}
+
+/* Responds with {"targets": [{"stop": {...}, "departure": {...}}, ...], "max": 8}, in the order added */
+static esp_err_t send_targets(httpd_req_t *req, const char *status)
+{
+    trafiklab_target_t targets[GTG_DEV_CONFIG_MAX_TARGETS];
+    size_t count = 0;
+    if (gtg_dev_config_get_targets(targets, GTG_DEV_CONFIG_MAX_TARGETS, &count) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not read the tracked departures");
+    }
+
+    cJSON *json = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(json, "targets");
+    bool ok = list != NULL && cJSON_AddNumberToObject(json, "max", GTG_DEV_CONFIG_MAX_TARGETS) != NULL;
+
+    for (size_t i = 0; ok && i < count; i++) {
+        ok = add_target_json(list, &targets[i]);
+    }
+
+    if (!ok) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    esp_err_t err = send_json(req, status, json);
+    cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t targets_get_handler(httpd_req_t *req)
+{
+    return send_targets(req, "200 OK");
+}
+
 /* Expects {"stop": {"id": "...", "name": "...", "town": "..."},
  *          "departure": {"line": "...", "mode": "...", "destination": "..."}}
  * as returned by /api/stops/search and /api/departures/available, adds it to realtime_targets
- * and responds with {"count": n, "max": 8} */
+ * and responds like GET /api/targets */
 static esp_err_t targets_post_handler(httpd_req_t *req)
 {
     esp_err_t err;
@@ -629,8 +684,7 @@ static esp_err_t targets_post_handler(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
     }
 
-    size_t count = 0;
-    err = gtg_dev_config_add_target(&target, &count);
+    err = gtg_dev_config_add_target(&target, NULL);
 
     if (err == ESP_ERR_NOT_ALLOWED) {
         httpd_resp_set_status(req, "409 Conflict");
@@ -649,17 +703,7 @@ static esp_err_t targets_post_handler(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not add the departure");
     }
 
-    json = cJSON_CreateObject();
-    if (json == NULL
-        || cJSON_AddNumberToObject(json, "count", count) == NULL
-        || cJSON_AddNumberToObject(json, "max", GTG_DEV_CONFIG_MAX_TARGETS) == NULL) {
-        cJSON_Delete(json);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
-    }
-
-    err = send_json(req, "201 Created", json);
-    cJSON_Delete(json);
-    return err;
+    return send_targets(req, "201 Created");
 }
 
 static const httpd_uri_t api_uris[] = {
@@ -704,6 +748,11 @@ static const httpd_uri_t api_uris[] = {
         .uri       = "/api/departures/available",
         .method    = HTTP_POST,
         .handler   = departures_available_post_handler,
+    },
+    {
+        .uri       = "/api/targets",
+        .method    = HTTP_GET,
+        .handler   = targets_get_handler,
     },
     {
         .uri       = "/api/targets",

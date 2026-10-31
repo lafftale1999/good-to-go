@@ -243,6 +243,31 @@ esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *co
     return err;
 }
 
+esp_err_t gtg_dev_config_get_targets(trafiklab_target_t *out, size_t max, size_t *count)
+{
+    if (out == NULL || count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *count = 0;
+
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    const trafiklab_target_list_t *targets = &s_config.realtime_targets;
+    size_t copied = targets->len < max ? targets->len : max;
+    memcpy(out, targets->list, copied * sizeof(*out));
+    bool fits = targets->len <= max;
+
+    xSemaphoreGive(s_mutex);
+
+    *count = copied;
+    return fits ? ESP_OK : ESP_ERR_INVALID_SIZE;
+}
+
 bool gtg_dev_config_has_target(const char *stop_id, const gtg_departure_option_t *departure)
 {
     if (stop_id == NULL || departure == NULL || s_mutex == NULL) {

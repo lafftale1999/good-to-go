@@ -61,6 +61,56 @@ main {
     border-color: currentColor;
 }
 
+/* the departures already saved, at the top of the stop step */
+#saved {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 4px;
+    text-align: left;
+}
+
+#saved h2 {
+    margin: 0;
+    font-size: 1.1em;
+}
+
+#saved-count {
+    margin: 0;
+    opacity: 0.7;
+}
+
+#saved-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 4px;
+}
+
+#saved-list:empty {
+    display: none;
+}
+
+#saved-list li {
+    display: flex;
+    gap: 8px;
+}
+
+#saved-list .saved-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#saved-list .details {
+    margin-left: auto;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
 /* expands a collapsed .options list, styled as a link so it doesn't read as a next step */
 .show-more {
     justify-self: start;
