@@ -17,12 +17,15 @@
 #include "gtg_mdns.h"
 #include "gtg_api_keys.h"
 #include "gtg_dev_config.h"
+#include "gtg_lcd.h"
 
 /* the station retries 5 times, which ends well within this */
 #define BOOT_WIFI_TIMEOUT_MS    60000
 #define NTP_SYNC_TIMEOUT_MS     30000
 
 static const char *TAG = "main";
+
+static gtg_lcd_module_t s_lcd;
 
 /* Connects with the stored credentials. False when none are stored or the retries fail */
 static bool connect_stored_wifi(void)
@@ -93,6 +96,11 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* the device works without the screen, so a missing one is only logged */
+    if (gtg_lcd_init(&s_lcd) == ESP_OK) {
+        gtg_lcd_print(&s_lcd, "Hello world", NULL);
+    }
 
     ESP_ERROR_CHECK(gtg_dev_config_init());
 

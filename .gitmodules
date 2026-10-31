@@ -1,3 +1,6 @@
 [submodule "components/esp_littlefs"]
 	path = components/esp_littlefs
 	url = https://github.com/joltwallet/esp_littlefs.git
+[submodule "components/lcd_screen"]
+	path = components/lcd_screen
+	url = git@github.com:lafftale1999/lcd_1602_i2c_driver.git
