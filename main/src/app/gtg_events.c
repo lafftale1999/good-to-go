@@ -80,6 +80,8 @@ const char *gtg_event_type_name(gtg_event_type_t type)
 {
     switch (type) {
     case GTG_EV_CONNECTION_CHANGED: return "connection changed";
+    case GTG_EV_CONNECTION_RETRYING: return "connection retrying";
+    case GTG_EV_CONNECTION_FAILED:  return "connection failed";
     case GTG_EV_API_KEY_REJECTED:   return "API key rejected";
     case GTG_EV_BUTTON_CLICKED:     return "button clicked";
     case GTG_EV_BUTTON_DOUBLE_CLICKED: return "double-click";

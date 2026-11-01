@@ -15,6 +15,7 @@
 #include "esp_event.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 
 #include "gtg_cache.h"
 #include "gtg_soft_access_point.h"
@@ -92,6 +93,12 @@ static const char *const FACTORY_KEYS[GTG_API_KEY_COUNT] = {
 #define CONFIG_HINT_TOP         "Stop config mode"
 #define CONFIG_HINT_BOTTOM      "Hold 5 sec..."
 
+/* shown while the station retries after the connection was lost while running */
+#define CONN_LOST_TOP           "Connection lost!"
+
+/* departure fetches that may fail in a row before the configuration mode starts */
+#define FETCH_FAILURES_MAX      3
+
 /* The definition behind gtg_app_handle_t, only visible in this file */
 struct gtg_app {
     wifi_ap_meta_t          ap_cred;
@@ -107,6 +114,14 @@ struct gtg_app {
     TickType_t              redraw_at;
     TaskHandle_t            event_task;
     bool                    ntp_started;
+
+    /* set while the station retries after the connection was lost while running, and whether
+     * a departure was shown then, which is drawn again once it reconnects */
+    bool                    conn_lost;
+    bool                    resume_redraw;
+
+    /* departure fetches that failed in a row, a successful one resets it */
+    uint8_t                 fetch_failures;
 
     /* the configuration mode is started and stopped from several tasks */
     SemaphoreHandle_t       mode_lock;
@@ -148,6 +163,13 @@ static void log_event(const gtg_event_t *event)
     case GTG_EV_CONNECTION_CHANGED:
         ESP_LOGI(TAG, "event: %s, %s (reason %u)", gtg_event_type_name(event->type),
                  event->wifi.connected ? "connected" : "disconnected", event->wifi.reason);
+        break;
+    case GTG_EV_CONNECTION_RETRYING:
+        ESP_LOGI(TAG, "event: %s, %u/%u (reason %u)", gtg_event_type_name(event->type),
+                 event->wifi.retry, event->wifi.max_retries, event->wifi.reason);
+        break;
+    case GTG_EV_CONNECTION_FAILED:
+        ESP_LOGI(TAG, "event: %s (reason %u)", gtg_event_type_name(event->type), event->wifi.reason);
         break;
     case GTG_EV_API_KEY_REJECTED:
         ESP_LOGI(TAG, "event: %s, %s", gtg_event_type_name(event->type),
@@ -667,6 +689,57 @@ static void stop_redraw(gtg_app_handle_t app)
     app->redraw = false;
 }
 
+/* Shows why the configuration mode starts, then starts it */
+static void enter_config_mode(gtg_app_handle_t app, const char *top, const char *bottom)
+{
+    stop_redraw(app);
+    gtg_lcd_print(&app->lcd, top, bottom);
+    vTaskDelay(pdMS_TO_TICKS(ERROR_SHOW_TIME_S * 1000));
+    config_mode_start(app);
+}
+
+/*
+ * Fetches the departure at index when it is due, see gtg_cache_refresh(), and counts the
+ * fetches that fail in a row. At FETCH_FAILURES_MAX the configuration mode starts, unless it
+ * already runs, and the count starts over. A fresh node makes no request and isn't counted.
+ *
+ * \return false when the configuration mode started, which then has the screen
+ */
+static bool refresh_departure(gtg_app_handle_t app, size_t index)
+{
+    if (gtg_cache_is_fresh(&app->cache, index)) {
+        return true;
+    }
+
+    esp_err_t err = gtg_cache_refresh(&app->cache, index);
+    if (err == ESP_OK) {
+        if (app->fetch_failures > 0) {
+            ESP_LOGI(TAG, "fetch succeeded, %u failures in a row cleared", app->fetch_failures);
+        }
+        app->fetch_failures = 0;
+        return true;
+    }
+
+    app->fetch_failures++;
+    ESP_LOGW(TAG, "fetch failed, %u/%u in a row: %s", app->fetch_failures, FETCH_FAILURES_MAX,
+             esp_err_to_name(err));
+
+    if (app->fetch_failures < FETCH_FAILURES_MAX) {
+        return true;
+    }
+
+    app->fetch_failures = 0;
+
+    if (gtg_https_server_is_running()) {
+        ESP_LOGW(TAG, "too many failed fetches, the configuration mode already runs");
+        return true;
+    }
+
+    ESP_LOGW(TAG, "too many failed fetches, starting the configuration mode");
+    enter_config_mode(app, "Fetch failed 3x", "Starting config");
+    return false;
+}
+
 /* Draws the chosen departure and plans the next redraw for when its times change */
 static void redraw_departure(gtg_app_handle_t app)
 {
@@ -696,8 +769,9 @@ static void on_redraw_timer(gtg_app_handle_t app)
             return;
         }
 
-        if (gtg_cache_seconds_until_due(&app->cache, app->index) == 0) {
-            gtg_cache_refresh(&app->cache, app->index);
+        if (gtg_cache_seconds_until_due(&app->cache, app->index) == 0
+            && !refresh_departure(app, app->index)) {
+            return;
         }
     }
 
@@ -729,7 +803,9 @@ static void show_chosen(gtg_app_handle_t app)
         char top[GTG_LCD_COLUMNS + 1];
         format_departure_name(&app->cache.targets[app->index], top);
         gtg_lcd_print(&app->lcd, top, "Updating...");
-        gtg_cache_refresh(&app->cache, app->index);
+        if (!refresh_departure(app, app->index)) {
+            return;
+        }
     }
 
     gtg_cache_log(&app->cache, app->index);
@@ -772,6 +848,64 @@ static void toggle_config_mode(gtg_app_handle_t app)
     }
 }
 
+/* The connection was lost while running, or came back. The station retries by itself, see
+ * on_connection_retrying() and on_connection_failed() */
+static void on_connection_changed(gtg_app_handle_t app, const gtg_event_t *event)
+{
+    if (!event->wifi.connected) {
+        /* the device disconnected itself, e.g. to join another network from the configuration */
+        if (event->wifi.reason == WIFI_REASON_ASSOC_LEAVE) {
+            return;
+        }
+
+        ESP_LOGW(TAG, "connection lost, the station retries");
+        app->conn_lost = true;
+        app->resume_redraw = app->redraw;
+        stop_redraw(app);
+        gtg_lcd_print(&app->lcd, CONN_LOST_TOP, "Retrying...");
+        return;
+    }
+
+    if (!app->conn_lost) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "connection back");
+    app->conn_lost = false;
+
+    /* the cache is unchanged meanwhile, it only changes in sync_cache() */
+    if (app->resume_redraw && app->index < app->cache.len) {
+        redraw_departure(app);
+    } else if (!show_config_hint(app)) {
+        gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+    }
+}
+
+static void on_connection_retrying(gtg_app_handle_t app, const gtg_event_t *event)
+{
+    if (!app->conn_lost) {
+        return;
+    }
+
+    /* room for any uint8_t, the counts are single digits and fit the screen */
+    char bottom[sizeof("Retrying: 255/255")];
+    snprintf(bottom, sizeof(bottom), "Retrying: %u/%u", event->wifi.retry, event->wifi.max_retries);
+    gtg_lcd_print(&app->lcd, CONN_LOST_TOP, bottom);
+}
+
+/* The station gave up on the lost connection, the user reconnects it in the configuration */
+static void on_connection_failed(gtg_app_handle_t app)
+{
+    if (!app->conn_lost) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "could not reconnect, starting the configuration mode");
+    app->conn_lost = false;
+    app->resume_redraw = false;
+    enter_config_mode(app, CONN_LOST_TOP, "Starting config");
+}
+
 esp_err_t gtg_app_run(gtg_app_handle_t app) {
     if (app == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -783,14 +917,19 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
         app->event_task = NULL;
     }
 
-    /* every departure is fetched once, one request per stop */
+    /* every departure is fetched once, one request per stop: a fetch fills every node on its
+     * stop, so the later ones on a fetched stop are fresh and make no request */
     gtg_lcd_print(&app->lcd, "Fetching...", "");
     sync_cache(app);
     app->index = 0;
-    gtg_cache_refresh_all(&app->cache);
+
+    bool config_started = false;
+    for (size_t i = 0; i < app->cache.len && !config_started; i++) {
+        config_started = !refresh_departure(app, i);
+    }
 
     /* after the first setup the configuration mode is still on */
-    if (!show_config_hint(app)) {
+    if (!config_started && !show_config_hint(app)) {
         gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
     }
 
@@ -834,7 +973,15 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
                     continue;
 
                 case GTG_EV_CONNECTION_CHANGED:
-                    // if not corrected write error message and wait for configuration mode.
+                    on_connection_changed(app, &event);
+                    break;
+
+                case GTG_EV_CONNECTION_RETRYING:
+                    on_connection_retrying(app, &event);
+                    break;
+
+                case GTG_EV_CONNECTION_FAILED:
+                    on_connection_failed(app);
                     break;
 
                 case GTG_EV_API_KEY_REJECTED:

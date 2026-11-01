@@ -42,16 +42,23 @@ static volatile wifi_station_state_t s_state = WIFI_STATION_IDLE;
 static volatile uint8_t s_last_reason = 0;
 static int s_retry_num = 0;
 
-static void post_connection_changed(bool connected, uint8_t reason)
+static void post_wifi_event(gtg_event_type_t type, bool connected, uint8_t reason, uint8_t retry)
 {
     gtg_event_t event = {
-        .type = GTG_EV_CONNECTION_CHANGED,
+        .type = type,
         .wifi = {
             .connected = connected,
             .reason = reason,
+            .retry = retry,
+            .max_retries = WIFI_STA_MAXIMUM_RETRY,
         },
     };
     gtg_events_post(&event);
+}
+
+static void post_connection_changed(bool connected, uint8_t reason)
+{
+    post_wifi_event(GTG_EV_CONNECTION_CHANGED, connected, reason, 0);
 }
 
 /* Stores the credentials the driver connected with in the device configuration, so only
@@ -104,11 +111,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             s_retry_num++;
             s_state = WIFI_STATION_CONNECTING;
             ESP_LOGI(TAG, "retry to connect to the AP (%d/%d)", s_retry_num, WIFI_STA_MAXIMUM_RETRY);
+            post_wifi_event(GTG_EV_CONNECTION_RETRYING, false, event->reason, (uint8_t)s_retry_num);
             esp_wifi_connect();
         } else {
             ESP_LOGE(TAG, "failed to connect, reason=%d", event->reason);
             s_state = WIFI_STATION_FAILED;
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
+            post_wifi_event(GTG_EV_CONNECTION_FAILED, false, event->reason, 0);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
