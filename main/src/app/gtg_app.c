@@ -184,12 +184,37 @@ static void log_event(const gtg_event_t *event)
     case GTG_EV_CONFIG_APPLIED:
     case GTG_EV_TARGET_ADDED:
     case GTG_EV_TARGET_REMOVED:
+    case GTG_EV_CONFIG_LOGIN:
         ESP_LOGI(TAG, "event: %s", gtg_event_type_name(event->type));
         break;
     default:
         ESP_LOGW(TAG, "event: unknown type %d", event->type);
         break;
     }
+}
+
+/* The login screen of the configuration: the address and the password the page asks for, made
+ * anew at every start of the server */
+static void show_config_login(gtg_app_handle_t app)
+{
+    char pass[GTG_HTTPS_PASSWORD_LEN + 1];
+    if (gtg_https_server_get_password(pass, sizeof(pass)) != ESP_OK) {
+        gtg_lcd_print(&app->lcd, "Surf to webpage:", GTG_CONFIG_URL);
+        return;
+    }
+
+    char bottom[sizeof("PASS: ") + GTG_HTTPS_PASSWORD_LEN];
+    snprintf(bottom, sizeof(bottom), "PASS: %s", pass);
+    gtg_lcd_print(&app->lcd, GTG_CONFIG_URL, bottom);
+
+    memset(pass, 0, sizeof(pass));
+    memset(bottom, 0, sizeof(bottom));
+}
+
+/* A user logged in to the configuration page, the password is no longer needed on the screen */
+static void show_config_logged_in(gtg_app_handle_t app)
+{
+    gtg_lcd_print(&app->lcd, "Configuring...", "");
 }
 
 /* Erases the stored configuration and restarts, which brings the device back to its first boot
@@ -233,6 +258,10 @@ static void event_task(void *arg)
         case GTG_EV_BUTTON_LONG_HOLD:
             log_event(&event);
             factory_reset(app);
+            break;
+        case GTG_EV_CONFIG_LOGIN:
+            log_event(&event);
+            show_config_logged_in(app);
             break;
         default:
             log_event(&event);
@@ -381,7 +410,7 @@ static void config_mode_stop_locked(void)
  * Starts the configuration mode: the server and mDNS, which answer on every interface, so the
  * page is reachable at goodtogo.local on the user's network once the station is connected. The
  * AP is only started when the station isn't connected, and its credentials are shown on the
- * LCD, otherwise the address is.
+ * LCD, otherwise the address and the login password are.
  */
 static esp_err_t config_mode_start(gtg_app_handle_t app)
 {
@@ -411,7 +440,7 @@ static esp_err_t config_mode_start(gtg_app_handle_t app)
         snprintf(bot_msg, sizeof(bot_msg), "PASS: %s", app->ap_cred.pass);
         gtg_lcd_print(&app->lcd, top_msg, bot_msg);
     } else if (err == ESP_OK) {
-        gtg_lcd_print(&app->lcd, "Surf to webpage:", GTG_CONFIG_URL);
+        show_config_login(app);
     }
 
     xSemaphoreGive(app->mode_lock);
@@ -436,7 +465,8 @@ static void config_mode_stop(gtg_app_handle_t app)
 
 /*
  * Runs from boot, whatever the device is doing, and checks every second:
- *  - the LCD switches from the AP's credentials to goodtogo.local when a client joins the AP
+ *  - the LCD switches from the AP's credentials to goodtogo.local and the login password when a
+ *    client joins the AP
  *  - the AP is stopped once its last client leaves and the station is connected, the user then
  *    reaches goodtogo.local over the home network
  *  - the configuration server, mDNS and the AP are stopped once the configuration is valid and
@@ -458,10 +488,11 @@ static void watch_task(void *arg)
 
         xSemaphoreTake(app->mode_lock, portMAX_DELAY);
 
-        /* the AP's credentials are shown until a client joins, then the address it surfs to */
+        /* the AP's credentials are shown until a client joins, then the address it surfs to
+         * and the login password */
         bool ap_has_client = wifi_softap_is_running() && wifi_softap_has_client();
         if (ap_has_client && !ap_had_client) {
-            gtg_lcd_print(&app->lcd, "Surf to webpage:", GTG_CONFIG_URL);
+            show_config_login(app);
         }
         ap_had_client = ap_has_client;
 
@@ -500,7 +531,7 @@ static void run_configuration(gtg_app_handle_t app)
     }
 
     ESP_LOGI(TAG, "waiting to be configured at https://%s", GTG_CONFIG_URL);
-    gtg_lcd_print(&app->lcd, "Surf to webpage:", GTG_CONFIG_URL);
+    show_config_login(app);
 
     /* the user enters the network credentials at goodtogo.local, which connects the station */
     ESP_ERROR_CHECK(gtg_dev_config_wait_flags(GTG_DEV_FLAG_CONNECTED, portMAX_DELAY));
@@ -993,6 +1024,11 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
                 case GTG_EV_TARGET_REMOVED:
                     /* only while the configuration is valid, so only with departures left */
                     show_config_hint(app);
+                    break;
+
+                case GTG_EV_CONFIG_LOGIN:
+                    stop_redraw(app);
+                    show_config_logged_in(app);
                     break;
 
                 default:

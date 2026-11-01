@@ -28,6 +28,7 @@ typedef enum {
                                      configuration with the "Done" button, see /api/config/apply */
     GTG_EV_TARGET_ADDED,        /*!< a departure was added to realtime_targets */
     GTG_EV_TARGET_REMOVED,      /*!< a departure was removed from realtime_targets */
+    GTG_EV_CONFIG_LOGIN,        /*!< a user logged in to the configuration page, see /api/login */
 } gtg_event_type_t;
 
 typedef struct {

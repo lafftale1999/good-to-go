@@ -12,6 +12,7 @@
 #include "esp_littlefs.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "cJSON.h"
 
 #include "gtg_wifi_station.h"
@@ -37,13 +38,60 @@
 #define FACTORY_RESET_CONFIRM           "factory-reset"
 #define FILE_PATH_MAX         (sizeof(WWW_BASE_PATH) + CONFIG_HTTPD_MAX_URI_LEN + sizeof(WWW_INDEX_FILE) + sizeof(WWW_GZIP_SUFFIX))
 
+/* No I, O, 0 or 1, which are easily mistaken for each other on the LCD. 32 characters, so a
+ * random byte picks one without bias */
+#define PASSWORD_ALPHABET     "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+/* The session token is sent as a cookie, which the browser keeps and sends with every request.
+ * HttpOnly keeps it from the page's scripts, SameSite=Strict from requests other sites start */
+#define SESSION_COOKIE        "gtg_session"
+#define SESSION_TOKEN_BYTES   32
+#define SESSION_TOKEN_LEN     (2 * SESSION_TOKEN_BYTES)
+#define SESSION_MAX           4
+#define SESSION_TIMEOUT_US    (5LL * 60 * 1000 * 1000)
+
+/* wrong passwords in a row before the login is locked for a while */
+#define LOGIN_MAX_FAILURES    5
+#define LOGIN_LOCK_US         (30LL * 1000 * 1000)
+
 static const char *TAG = "https server";
 
 static httpd_handle_t s_server = NULL;
 static bool s_www_mounted = false;
 
-/* esp_timer time of the last request, or of the start when none has come yet */
+/* esp_timer time of the last logged in request or login, or of the start when none has come yet */
 static volatile int64_t s_last_activity_us = 0;
+
+/* Made at every start. The sessions and the login state are only used from the server task */
+static char s_password[GTG_HTTPS_PASSWORD_LEN + 1];
+
+typedef struct {
+    char    token[SESSION_TOKEN_LEN + 1];   /*!< hex, empty when the slot is free */
+    int64_t last_used_us;
+} session_t;
+
+static session_t s_sessions[SESSION_MAX];
+static uint8_t s_login_failures = 0;
+static int64_t s_login_locked_until_us = 0;
+
+/* Whether the response to the request being handled has a 2xx status. The server handles one
+ * request at a time, so one flag serves them all, see set_status() and send_err() */
+static bool s_resp_success = true;
+
+/* httpd_resp_set_status() that notes whether the status is a success, as the server can't read
+ * it back. Every status in this file is set through here or send_err() */
+static esp_err_t set_status(httpd_req_t *req, const char *status)
+{
+    s_resp_success = status[0] == '2';
+    return httpd_resp_set_status(req, status);
+}
+
+/* httpd_resp_send_err(), whose codes are all errors */
+static esp_err_t send_err(httpd_req_t *req, httpd_err_code_t code, const char *msg)
+{
+    s_resp_success = false;
+    return httpd_resp_send_err(req, code, msg);
+}
 
 /* Embedded from cred/ through EMBED_TXTFILES in main/CMakeLists.txt */
 extern const unsigned char servercert_start[] asm("_binary_servercert_pem_start");
@@ -101,14 +149,14 @@ static esp_err_t static_file_get_handler(httpd_req_t *req)
 
     /* don't allow escaping the www directory */
     if (uri_len == 0 || req->uri[0] != '/' || memmem(req->uri, uri_len, "..", 2) != NULL) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid path");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "Invalid path");
     }
 
     int len = snprintf(path, sizeof(path), WWW_BASE_PATH "%.*s%s",
                        (int)uri_len, req->uri,
                        req->uri[uri_len - 1] == '/' ? WWW_INDEX_FILE : "");
     if (len < 0 || (size_t)len + sizeof(WWW_GZIP_SUFFIX) > sizeof(path)) {
-        return httpd_resp_send_err(req, HTTPD_414_URI_TOO_LONG, "URI too long");
+        return send_err(req, HTTPD_414_URI_TOO_LONG, "URI too long");
     }
 
     /* the mime type comes from the original name, not the .gz one */
@@ -119,14 +167,14 @@ static esp_err_t static_file_get_handler(httpd_req_t *req)
     if (!gzipped) {
         path[len] = '\0';
         if (!file_exists(path)) {
-            return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
+            return send_err(req, HTTPD_404_NOT_FOUND, "Not found");
         }
     }
 
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         ESP_LOGE(TAG, "failed to open %s", path);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read file");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read file");
     }
 
     httpd_resp_set_type(req, mime_type);
@@ -160,10 +208,10 @@ static esp_err_t send_json(httpd_req_t *req, const char *status, cJSON *json)
 {
     char *body = cJSON_PrintUnformatted(json);
     if (body == NULL) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
-    httpd_resp_set_status(req, status);
+    set_status(req, status);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_sendstr(req, body);
@@ -193,7 +241,7 @@ static esp_err_t send_wifi_status(httpd_req_t *req, const char *status)
         || cJSON_AddStringToObject(json, "state", station_state_name(state)) == NULL
         || cJSON_AddNumberToObject(json, "reason", reason) == NULL) {
         cJSON_Delete(json);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     esp_err_t err = send_json(req, status, json);
@@ -220,7 +268,7 @@ static esp_err_t send_status(httpd_req_t *req, const char *status)
         || cJSON_AddBoolToObject(json, "has_departures", flags & GTG_DEV_FLAG_HAS_DEPARTURES) == NULL
         || cJSON_AddBoolToObject(json, "valid_config", flags & GTG_DEV_FLAG_VALID_CONFIG) == NULL) {
         cJSON_Delete(json);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     esp_err_t err = send_json(req, status, json);
@@ -254,7 +302,7 @@ static cJSON *receive_json(httpd_req_t *req, esp_err_t *err)
     char body[API_BODY_MAX_LEN + 1];
 
     if (req->content_len == 0 || req->content_len > API_BODY_MAX_LEN) {
-        *err = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        *err = send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body length");
         return NULL;
     }
 
@@ -278,7 +326,7 @@ static cJSON *receive_json(httpd_req_t *req, esp_err_t *err)
     memset(body, 0, sizeof(body));
 
     if (json == NULL) {
-        *err = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        *err = send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
     }
 
     return json;
@@ -306,14 +354,14 @@ static esp_err_t wifi_connect_post_handler(httpd_req_t *req)
     cJSON_Delete(json);
 
     if (err == ESP_ERR_INVALID_ARG) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID must be 1-32 and password 8-63 characters");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "SSID must be 1-32 and password 8-63 characters");
     }
     if (err == ESP_ERR_INVALID_STATE) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Already connecting");
     }
     if (err != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to connect");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to connect");
     }
 
     return send_wifi_status(req, "202 Accepted");
@@ -328,11 +376,11 @@ static esp_err_t wifi_scan_get_handler(httpd_req_t *req)
 
     esp_err_t err = wifi_station_scan(results, WIFI_SCAN_MAX_RESULTS, &count);
     if (err == ESP_ERR_INVALID_STATE) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Busy connecting, try again shortly");
     }
     if (err != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Scan failed");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Scan failed");
     }
 
     cJSON *json = cJSON_CreateArray();
@@ -355,7 +403,7 @@ static esp_err_t wifi_scan_get_handler(httpd_req_t *req)
         }
     }
     if (json == NULL) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     err = send_json(req, "200 OK", json);
@@ -371,7 +419,7 @@ static esp_err_t send_api_keys_status(httpd_req_t *req)
         || cJSON_AddBoolToObject(json, "trafiklab", gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB)) == NULL
         || cJSON_AddBoolToObject(json, "google", gtg_api_keys_is_set(GTG_API_KEY_GOOGLE)) == NULL) {
         cJSON_Delete(json);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     esp_err_t err = send_json(req, "200 OK", json);
@@ -409,7 +457,7 @@ static esp_err_t api_key_post_handler(httpd_req_t *req)
     const api_key_endpoint_t *endpoint = req->user_ctx;
 
     if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Connect to WiFi first");
     }
 
@@ -429,17 +477,17 @@ static esp_err_t api_key_post_handler(httpd_req_t *req)
 
     if (err == ESP_ERR_INVALID_ARG) {
         _Static_assert(GTG_API_KEY_MAX_LEN == 64, "update the message below");
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+        return send_err(req, HTTPD_400_BAD_REQUEST,
                                    "The key must be 1-64 letters, digits, '-' or '_'");
     }
     if (err == ESP_ERR_NOT_ALLOWED) {
-        httpd_resp_set_status(req, "422 Unprocessable Content");
+        set_status(req, "422 Unprocessable Content");
         return httpd_resp_sendstr(req, endpoint->rejected_msg);
     }
     if (err != ESP_OK) {
         char msg[64];
         snprintf(msg, sizeof(msg), "Could not verify the key with %s, try again", endpoint->name);
-        httpd_resp_set_status(req, "502 Bad Gateway");
+        set_status(req, "502 Bad Gateway");
         return httpd_resp_sendstr(req, msg);
     }
 
@@ -451,11 +499,11 @@ static esp_err_t api_key_post_handler(httpd_req_t *req)
 static esp_err_t stops_search_post_handler(httpd_req_t *req)
 {
     if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Connect to WiFi first");
     }
     if (!gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB) || !gtg_api_keys_is_set(GTG_API_KEY_GOOGLE)) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Verify both API keys first");
     }
 
@@ -473,19 +521,19 @@ static esp_err_t stops_search_post_handler(httpd_req_t *req)
     cJSON_Delete(json);
 
     if (err == ESP_ERR_INVALID_ARG) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Enter a stop name of at most 64 characters");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "Enter a stop name of at most 64 characters");
     }
     if (err == ESP_ERR_NOT_ALLOWED) {
-        httpd_resp_set_status(req, "422 Unprocessable Content");
+        set_status(req, "422 Unprocessable Content");
         return httpd_resp_sendstr(req, "Trafiklab rejected the key");
     }
     if (err == ESP_ERR_INVALID_SIZE) {
-        httpd_resp_set_status(req, "422 Unprocessable Content");
+        set_status(req, "422 Unprocessable Content");
         return httpd_resp_sendstr(req, "Too many stops match, try a more specific name");
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "stop search failed: %s", esp_err_to_name(err));
-        httpd_resp_set_status(req, "502 Bad Gateway");
+        set_status(req, "502 Bad Gateway");
         return httpd_resp_sendstr(req, "Could not search Trafiklab, try again");
     }
 
@@ -509,7 +557,7 @@ static esp_err_t stops_search_post_handler(httpd_req_t *req)
         }
     }
     if (json == NULL) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     err = send_json(req, "200 OK", json);
@@ -524,11 +572,11 @@ static esp_err_t stops_search_post_handler(httpd_req_t *req)
 static esp_err_t departures_available_post_handler(httpd_req_t *req)
 {
     if (wifi_station_get_state(NULL) != WIFI_STATION_CONNECTED) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Connect to WiFi first");
     }
     if (!gtg_api_keys_is_set(GTG_API_KEY_TRAFIKLAB)) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "Verify the Trafiklab key first");
     }
 
@@ -560,26 +608,26 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
         free(options);
     }
     if (err == ESP_ERR_INVALID_ARG) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop id");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop id");
     }
     if (err == ESP_ERR_NOT_FINISHED) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
+        set_status(req, "503 Service Unavailable");
         return httpd_resp_sendstr(req, "The device clock isn't set yet, try again in a moment");
     }
     if (err == ESP_ERR_NOT_FOUND) {
-        httpd_resp_set_status(req, "404 Not Found");
+        set_status(req, "404 Not Found");
         return httpd_resp_sendstr(req, "Trafiklab doesn't know this stop, search again");
     }
     if (err == ESP_ERR_NOT_ALLOWED) {
-        httpd_resp_set_status(req, "422 Unprocessable Content");
+        set_status(req, "422 Unprocessable Content");
         return httpd_resp_sendstr(req, "Trafiklab rejected the key");
     }
     if (err == ESP_ERR_NO_MEM) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "departure lookup failed: %s", esp_err_to_name(err));
-        httpd_resp_set_status(req, "502 Bad Gateway");
+        set_status(req, "502 Bad Gateway");
         return httpd_resp_sendstr(req, "Could not fetch departures from Trafiklab, try again");
     }
 
@@ -614,7 +662,7 @@ static esp_err_t departures_available_post_handler(httpd_req_t *req)
     free(options);
 
     if (json == NULL) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     err = send_json(req, "200 OK", json);
@@ -679,7 +727,7 @@ static esp_err_t send_targets(httpd_req_t *req, const char *status)
     trafiklab_target_t targets[GTG_DEV_CONFIG_MAX_TARGETS];
     size_t count = 0;
     if (gtg_dev_config_get_targets(targets, GTG_DEV_CONFIG_MAX_TARGETS, &count) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not read the tracked departures");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not read the tracked departures");
     }
 
     cJSON *json = cJSON_CreateObject();
@@ -692,7 +740,7 @@ static esp_err_t send_targets(httpd_req_t *req, const char *status)
 
     if (!ok) {
         cJSON_Delete(json);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
     esp_err_t err = send_json(req, status, json);
@@ -732,26 +780,26 @@ static esp_err_t targets_post_handler(httpd_req_t *req)
     cJSON_Delete(json);
 
     if (!valid) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
     }
 
     err = gtg_dev_config_add_target(&target, NULL);
 
     if (err == ESP_ERR_NOT_ALLOWED) {
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "This departure is already tracked");
     }
     if (err == ESP_ERR_INVALID_SIZE) {
         char msg[48];
         snprintf(msg, sizeof(msg), "You can track at most %d departures", GTG_DEV_CONFIG_MAX_TARGETS);
-        httpd_resp_set_status(req, "409 Conflict");
+        set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, msg);
     }
     if (err == ESP_ERR_INVALID_ARG) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
     }
     if (err != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not add the departure");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not add the departure");
     }
 
     return send_targets(req, "201 Created");
@@ -779,17 +827,17 @@ static esp_err_t targets_delete_handler(httpd_req_t *req)
     cJSON_Delete(json);
 
     if (!valid) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
+        return send_err(req, HTTPD_400_BAD_REQUEST, "Invalid stop or departure");
     }
 
     err = gtg_dev_config_remove_target(stop_id, &option);
 
     if (err == ESP_ERR_NOT_FOUND) {
-        httpd_resp_set_status(req, "404 Not Found");
+        set_status(req, "404 Not Found");
         return httpd_resp_sendstr(req, "This departure is no longer tracked");
     }
     if (err != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not remove the departure");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not remove the departure");
     }
 
     return send_targets(req, "200 OK");
@@ -802,7 +850,7 @@ static void restart_cb(void *arg)
 
 /* Expects {"confirm": "factory-reset"}, erases the stored configuration and restarts the device,
  * which brings every module back to its first boot state. The confirmation guards against an
- * accidental request, the server has no login */
+ * accidental request from a logged in page */
 static esp_err_t factory_reset_post_handler(httpd_req_t *req)
 {
     esp_err_t err;
@@ -816,7 +864,7 @@ static esp_err_t factory_reset_post_handler(httpd_req_t *req)
     cJSON_Delete(json);
 
     if (!confirmed) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+        return send_err(req, HTTPD_400_BAD_REQUEST,
                                    "Confirm with {\"confirm\": \"" FACTORY_RESET_CONFIRM "\"}");
     }
 
@@ -828,16 +876,16 @@ static esp_err_t factory_reset_post_handler(httpd_req_t *req)
 
     /* the timer is made first, so the configuration isn't erased on a device that can't restart */
     if (esp_timer_create(&timer_args, &timer) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not prepare the restart");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not prepare the restart");
     }
 
     err = gtg_dev_config_factory_reset();
     if (err != ESP_OK) {
         esp_timer_delete(timer);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not erase the configuration");
+        return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not erase the configuration");
     }
 
-    httpd_resp_set_status(req, "202 Accepted");
+    set_status(req, "202 Accepted");
     err = httpd_resp_sendstr(req, "Factory reset done, the device restarts");
 
     /* restarts also when the response couldn't be sent, the configuration is already gone */
@@ -848,7 +896,189 @@ static esp_err_t factory_reset_post_handler(httpd_req_t *req)
     return err;
 }
 
+/* Compares in a time that doesn't depend on where the strings differ, so the response time tells
+ * nothing about the secret */
+static bool equal_const_time(const char *a, const char *b, size_t len)
+{
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+/* A new random password of letters and digits, with at least one of each */
+static void generate_password(void)
+{
+    _Static_assert(sizeof(PASSWORD_ALPHABET) - 1 == 32, "the alphabet must divide 256 for an even pick");
+
+    bool letter;
+    bool digit;
+    do {
+        uint8_t random[GTG_HTTPS_PASSWORD_LEN];
+        esp_fill_random(random, sizeof(random));
+
+        letter = false;
+        digit = false;
+        for (size_t i = 0; i < GTG_HTTPS_PASSWORD_LEN; i++) {
+            char c = PASSWORD_ALPHABET[random[i] % 32];
+            s_password[i] = c;
+            letter |= c >= 'A' && c <= 'Z';
+            digit |= c >= '0' && c <= '9';
+        }
+        s_password[GTG_HTTPS_PASSWORD_LEN] = '\0';
+    } while (!letter || !digit);
+}
+
+/* The password is shown in capitals, a phone keyboard may still send small letters */
+static bool password_matches(const char *given)
+{
+    if (strlen(given) != GTG_HTTPS_PASSWORD_LEN) {
+        return false;
+    }
+
+    char upper[GTG_HTTPS_PASSWORD_LEN];
+    for (size_t i = 0; i < GTG_HTTPS_PASSWORD_LEN; i++) {
+        char c = given[i];
+        upper[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+
+    bool match = equal_const_time(upper, s_password, GTG_HTTPS_PASSWORD_LEN);
+    memset(upper, 0, sizeof(upper));
+    return match;
+}
+
+static void clear_sessions(void)
+{
+    memset(s_sessions, 0, sizeof(s_sessions));
+}
+
+/* Starts a session in a free slot, or in place of the least recently used one */
+static const session_t *session_create(int64_t now)
+{
+    session_t *slot = &s_sessions[0];
+    for (size_t i = 0; i < SESSION_MAX; i++) {
+        if (s_sessions[i].token[0] == '\0') {
+            slot = &s_sessions[i];
+            break;
+        }
+        if (s_sessions[i].last_used_us < slot->last_used_us) {
+            slot = &s_sessions[i];
+        }
+    }
+
+    uint8_t random[SESSION_TOKEN_BYTES];
+    esp_fill_random(random, sizeof(random));
+    for (size_t i = 0; i < SESSION_TOKEN_BYTES; i++) {
+        snprintf(&slot->token[2 * i], 3, "%02x", random[i]);
+    }
+    memset(random, 0, sizeof(random));
+
+    slot->last_used_us = now;
+    return slot;
+}
+
+/* The live session whose cookie the request carries, NULL when there is none. It isn't renewed
+ * here, only once the request has succeeded, see tracked_handler(). Sessions that timed out are
+ * ended on the way */
+static session_t *session_find(httpd_req_t *req, int64_t now)
+{
+    char token[SESSION_TOKEN_LEN + 1];
+    size_t token_size = sizeof(token);
+
+    bool found = httpd_req_get_cookie_val(req, SESSION_COOKIE, token, &token_size) == ESP_OK
+              && strlen(token) == SESSION_TOKEN_LEN;
+
+    session_t *match = NULL;
+    for (size_t i = 0; i < SESSION_MAX; i++) {
+        session_t *session = &s_sessions[i];
+        if (session->token[0] == '\0') {
+            continue;
+        }
+        if (now - session->last_used_us >= SESSION_TIMEOUT_US) {
+            ESP_LOGI(TAG, "session timed out");
+            memset(session, 0, sizeof(*session));
+            continue;
+        }
+        if (found && equal_const_time(token, session->token, SESSION_TOKEN_LEN)) {
+            match = session;
+        }
+    }
+
+    memset(token, 0, sizeof(token));
+    return match;
+}
+
+/* Expects {"password": "..."}, the one on the device's LCD, and starts a session in a cookie.
+ * 401 for a wrong password, 429 while the login is locked after LOGIN_MAX_FAILURES in a row */
+static esp_err_t login_post_handler(httpd_req_t *req)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (now < s_login_locked_until_us) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Too many wrong passwords, try again in %d seconds",
+                 (int)((s_login_locked_until_us - now) / 1000000) + 1);
+        set_status(req, "429 Too Many Requests");
+        return httpd_resp_sendstr(req, msg);
+    }
+
+    esp_err_t err;
+    cJSON *json = receive_json(req, &err);
+    if (json == NULL) {
+        return err;
+    }
+
+    char *password = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "password"));
+    bool match = password != NULL && password_matches(password);
+
+    if (password != NULL) {
+        memset(password, 0, strlen(password));
+    }
+    cJSON_Delete(json);
+
+    if (!match) {
+        s_login_failures++;
+        ESP_LOGW(TAG, "wrong login password (%u/%d)", s_login_failures, LOGIN_MAX_FAILURES);
+
+        if (s_login_failures >= LOGIN_MAX_FAILURES) {
+            s_login_failures = 0;
+            s_login_locked_until_us = now + LOGIN_LOCK_US;
+            ESP_LOGW(TAG, "login locked for %lld s", LOGIN_LOCK_US / 1000000);
+        }
+
+        set_status(req, "401 Unauthorized");
+        return httpd_resp_sendstr(req, "Wrong password, check the device's screen");
+    }
+
+    s_login_failures = 0;
+    const session_t *session = session_create(now);
+
+    /* no Max-Age, the browser keeps it until it closes and the device ends it after 5 idle minutes */
+    char cookie[sizeof(SESSION_COOKIE) + SESSION_TOKEN_LEN + 64];
+    snprintf(cookie, sizeof(cookie), SESSION_COOKIE "=%s; Path=/; Secure; HttpOnly; SameSite=Strict",
+             session->token);
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    s_last_activity_us = now;
+    ESP_LOGI(TAG, "logged in");
+
+    gtg_event_t event = { .type = GTG_EV_CONFIG_LOGIN };
+    gtg_events_post(&event);
+
+    /* the header points at cookie, which must outlive the send */
+    err = httpd_resp_sendstr(req, "Logged in");
+    memset(cookie, 0, sizeof(cookie));
+    return err;
+}
+
 static const httpd_uri_t api_uris[] = {
+    {
+        .uri       = "/api/login",
+        .method    = HTTP_POST,
+        .handler   = login_post_handler,
+    },
     {
         .uri       = "/api/status",
         .method    = HTTP_GET,
@@ -932,16 +1162,58 @@ static const httpd_uri_t api_uris[] = {
 
 #define URI_COUNT   (sizeof(api_uris) / sizeof(api_uris[0]))
 
-/* Every URI is registered with this handler, which stamps the request as activity and then
- * calls the URI's own handler with its own user_ctx */
+/* The login itself, and the static files, which hold no configuration: the page shows the login
+ * form when the API answers 401 */
+static bool is_open(const httpd_uri_t *uri)
+{
+    return uri->handler == login_post_handler || uri->handler == static_file_get_handler;
+}
+
+/* Every URI is registered with this handler, which checks the session of every request but the
+ * open ones and calls the URI's own handler with its own user_ctx. Only a request that succeeded,
+ * with a 2xx response, renews its session and counts as activity, so failing requests can't keep
+ * a session or the server alive */
 static esp_err_t tracked_handler(httpd_req_t *req)
 {
     const httpd_uri_t *uri = req->user_ctx;
-
-    s_last_activity_us = esp_timer_get_time();
-
     req->user_ctx = uri->user_ctx;
-    return uri->handler(req);
+
+    if (is_open(uri)) {
+        return uri->handler(req);
+    }
+
+    session_t *session = session_find(req, esp_timer_get_time());
+    if (session == NULL) {
+        set_status(req, "401 Unauthorized");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        return httpd_resp_sendstr(req, "Log in first");
+    }
+
+    /* the server answers 200 OK unless the handler sets another status */
+    s_resp_success = true;
+    esp_err_t err = uri->handler(req);
+
+    /* from when it ended, as e.g. the departure search can take a minute */
+    if (err == ESP_OK && s_resp_success) {
+        int64_t done = esp_timer_get_time();
+        session->last_used_us = done;
+        s_last_activity_us = done;
+    }
+
+    return err;
+}
+
+esp_err_t gtg_https_server_get_password(char *out, size_t out_size)
+{
+    if (out == NULL || out_size < sizeof(s_password)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    memcpy(out, s_password, sizeof(s_password));
+    return ESP_OK;
 }
 
 int64_t gtg_https_server_last_activity_us(void)
@@ -991,6 +1263,12 @@ esp_err_t gtg_https_server_init(void)
     }
 
     ESP_RETURN_ON_ERROR(www_mount(), TAG, "web files unavailable");
+
+    /* a new password and no sessions, so a login from an earlier configuration mode is over */
+    generate_password();
+    clear_sessions();
+    s_login_failures = 0;
+    s_login_locked_until_us = 0;
 
     httpd_ssl_config_t conf = HTTPD_SSL_CONFIG_DEFAULT();
     conf.httpd.uri_match_fn = httpd_uri_match_wildcard;
@@ -1042,6 +1320,9 @@ void gtg_https_server_deinit(void)
         }
         s_server = NULL;
     }
+
+    clear_sessions();
+    memset(s_password, 0, sizeof(s_password));
 
     www_unmount();
 }
