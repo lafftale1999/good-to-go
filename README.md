@@ -242,3 +242,14 @@ To change the setup later, hold the button for 5 seconds and open `https://goodt
 * The device accepts WPA2 even if your network uses WPA3. Someone imitating your network could then capture a WPA2
   handshake and try to guess your WiFi password offline, so use a strong WiFi password.
 * The clock is synced with NTP, which isn't authenticated.
+
+---
+
+## License
+
+Good To Go is released under the [MIT License](LICENSE): you may use, copy, change and share it, also commercially,
+as long as the copyright notice and license text are kept. It comes without any warranty, and the authors aren't
+liable for how it is used.
+
+Bundled third-party code keeps its own license: [cJSON](https://github.com/DaveGamble/cJSON) (MIT) in
+`main/lib/cJSON`, and the [esp_littlefs](https://github.com/joltwallet/esp_littlefs) (MIT) submodule.
