@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "nvs_flash.h"
 #include "esp_err.h"
@@ -26,21 +27,27 @@
 #include "gtg_lcd.h"
 #include "gtg_events.h"
 #include "gtg_button.h"
+#include "gtg_sleep.h"
 
 /* the station retries 5 times, which ends well within this */
 #define BOOT_WIFI_TIMEOUT_MS    60000
 #define NTP_SYNC_TIMEOUT_MS     30000
-#define EVENT_TASK_TIMEOUT_MS   300000
 
 /* room for the NVS erase and LCD writes of a factory reset */
 #define EVENT_TASK_STACK_SIZE   4096
 #define EVENT_TASK_PRIORITY     5
 
-/* Watches the configuration while it runs, see setup_task() */
-#define SETUP_TASK_STACK_SIZE   4096
-#define SETUP_TASK_PRIORITY     4
-#define SETUP_CHECK_PERIOD_MS   1000
-#define SETUP_IDLE_TIMEOUT_US   (5LL * 60 * 1000 * 1000)
+/* Watches the activity from boot, see watch_task() */
+#define WATCH_TASK_STACK_SIZE   4096
+#define WATCH_TASK_PRIORITY     4
+#define WATCH_PERIOD_MS         1000
+
+/* without a request the configuration server stops, without any activity the device sleeps */
+#define SERVER_IDLE_TIMEOUT_US  (5LL * 60 * 1000 * 1000)
+#define SLEEP_IDLE_TIMEOUT_US   (5LL * 60 * 1000 * 1000)
+
+/* lets the sleep message be read before the screen goes dark */
+#define SLEEP_MESSAGE_MS        1500
 
 /* how long the reason a configured start failed is shown before the configuration starts */
 #define ERROR_SHOW_TIME_S       3
@@ -51,14 +58,26 @@
 
 #define GTG_CONFIG_URL          "goodtogo.local"
 
+#define START_MSG_TOP           "U R Good To Go!"
+#define START_MSG_BOTTOM        "Press to search."
+
+/* shown after the last departure, before the double-click wraps around to the first */
+#define END_MSG_TOP             "Need more stops?"
+#define END_MSG_BOTTOM          "Hold 5 seconds..."
+
 /* The definition behind gtg_app_handle_t, only visible in this file */
 struct gtg_app {
     wifi_ap_meta_t          ap_cred;
     gtg_lcd_module_t        lcd;
     gtg_departure_cache_t   cache;
+
+    /* the chosen departure, cache.len is the end message after the last one */
     size_t                  index;
     TaskHandle_t            event_task;
     bool                    ntp_started;
+
+    /* the configuration mode is started and stopped from several tasks */
+    SemaphoreHandle_t       mode_lock;
 };
 
 static const char *TAG = "app";
@@ -103,6 +122,7 @@ static void log_event(const gtg_event_t *event)
                  event->api_key.which == GTG_API_KEY_TRAFIKLAB ? "Trafiklab" : "Google");
         break;
     case GTG_EV_BUTTON_CLICKED:
+    case GTG_EV_BUTTON_DOUBLE_CLICKED:
     case GTG_EV_BUTTON_SHORT_HOLD:
     case GTG_EV_BUTTON_LONG_HOLD:
         ESP_LOGI(TAG, "event: %s, button %u", gtg_event_type_name(event->type), event->button.id);
@@ -136,19 +156,31 @@ static void factory_reset(gtg_app_handle_t app)
 
 /* Consumes the events while gtg_app_init() runs, so the queue doesn't fill up. gtg_app_run()
  * stops it and takes over the queue, as the events would otherwise be split between them.
- * The long hold factory resets here too, so a device stuck in the configuration can be reset */
+ * The device isn't clickable until it has started, so clicks and short holds are only logged,
+ * while the long hold factory resets, so a device stuck in the configuration can be reset */
 static void event_task(void *arg)
 {
     gtg_app_handle_t app = arg;
     gtg_event_t event;
 
     while (true) {
-        if (gtg_events_receive(&event, portMAX_DELAY) == ESP_OK) {
-            log_event(&event);
+        if (gtg_events_receive(&event, portMAX_DELAY) != ESP_OK) {
+            continue;
+        }
 
-            if (event.type == GTG_EV_BUTTON_LONG_HOLD) {
-                factory_reset(app);
-            }
+        switch (event.type) {
+        case GTG_EV_BUTTON_CLICKED:
+        case GTG_EV_BUTTON_DOUBLE_CLICKED:
+        case GTG_EV_BUTTON_SHORT_HOLD:
+            ESP_LOGI(TAG, "event: %s, ignored until the device has started", gtg_event_type_name(event.type));
+            break;
+        case GTG_EV_BUTTON_LONG_HOLD:
+            log_event(&event);
+            factory_reset(app);
+            break;
+        default:
+            log_event(&event);
+            break;
         }
     }
 }
@@ -207,15 +239,14 @@ static void start_ntp(gtg_app_handle_t app)
     }
 }
 
-/* Waits for as long as it takes, the departures can't be shown without the time. SNTP keeps
- * retrying by itself */
+/* The departures can't be shown without the time, so this waits until it syncs. SNTP keeps
+ * retrying by itself, and watch_task() puts the device to sleep if it takes 5 minutes */
 static void wait_for_time(gtg_app_handle_t app)
 {
     if (gtg_dev_config_get_flags() & GTG_DEV_FLAG_TIME_SYNCED) {
         return;
     }
 
-    gtg_lcd_print(&app->lcd, "Syncing time...", "");
     while (gtg_ntp_wait_for_sync(NTP_SYNC_TIMEOUT_MS) != ESP_OK) {
         ESP_LOGW(TAG, "still waiting for the time to sync");
     }
@@ -251,73 +282,157 @@ static esp_err_t try_full_init(gtg_app_handle_t app) {
     return (gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG) ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
+/* The last activity of the device: a posted event, e.g. a button push or a connection change,
+ * or a request to the configuration server */
+static int64_t last_activity_us(void)
+{
+    int64_t events = gtg_events_last_activity_us();
+    int64_t server = gtg_https_server_last_activity_us();
+
+    return events > server ? events : server;
+}
+
+static void go_to_sleep(gtg_app_handle_t app)
+{
+    ESP_LOGI(TAG, "no activity for 5 minutes, going to sleep");
+
+    gtg_lcd_print(&app->lcd, "Going to sleep", "Press to wake");
+    vTaskDelay(pdMS_TO_TICKS(SLEEP_MESSAGE_MS));
+    gtg_lcd_clear(&app->lcd);
+    gtg_lcd_set_backlight(&app->lcd, false);
+
+    gtg_sleep_start();
+}
+
+/* Stops the AP, the server and mDNS, whichever run. Called with mode_lock held */
+static void config_mode_stop_locked(void)
+{
+    if (wifi_softap_is_running()) {
+        wifi_softap_deinit();
+    }
+    if (gtg_https_server_is_running()) {
+        gtg_https_server_deinit();
+        gtg_mdns_deinit();
+    }
+}
+
 /*
- * Runs alongside the configuration server and stops itself with it:
+ * Starts the configuration mode: the server and mDNS, which answer on every interface, so the
+ * page is reachable at goodtogo.local on the user's network once the station is connected. The
+ * AP is only started when the station isn't connected, and its credentials are shown on the
+ * LCD, otherwise the address is.
+ */
+static esp_err_t config_mode_start(gtg_app_handle_t app)
+{
+    esp_err_t err = ESP_OK;
+
+    xSemaphoreTake(app->mode_lock, portMAX_DELAY);
+
+    /* the server and mDNS are always started and stopped together */
+    if (!gtg_https_server_is_running()) {
+        err = gtg_mdns_init();
+        if (err == ESP_OK) {
+            err = gtg_https_server_init();
+            if (err != ESP_OK) {
+                gtg_mdns_deinit();
+            }
+        }
+    }
+
+    if (err == ESP_OK && !(gtg_dev_config_get_flags() & GTG_DEV_FLAG_CONNECTED) && !wifi_softap_is_running()) {
+        wifi_softap_init(&app->ap_cred);
+    }
+
+    if (err == ESP_OK && wifi_softap_is_running()) {
+        char top_msg[GTG_LCD_COLUMNS + 1];
+        char bot_msg[GTG_LCD_COLUMNS + 1];
+        snprintf(top_msg, sizeof(top_msg), "WIFI: %s", app->ap_cred.ssid);
+        snprintf(bot_msg, sizeof(bot_msg), "PASS: %s", app->ap_cred.pass);
+        gtg_lcd_print(&app->lcd, top_msg, bot_msg);
+    } else if (err == ESP_OK) {
+        gtg_lcd_print(&app->lcd, "Surf to webpage:", GTG_CONFIG_URL);
+    }
+
+    xSemaphoreGive(app->mode_lock);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start the configuration mode: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "configuration mode on, at https://%s", GTG_CONFIG_URL);
+    }
+
+    return err;
+}
+
+static void config_mode_stop(gtg_app_handle_t app)
+{
+    xSemaphoreTake(app->mode_lock, portMAX_DELAY);
+    config_mode_stop_locked();
+    xSemaphoreGive(app->mode_lock);
+
+    ESP_LOGI(TAG, "configuration mode off");
+}
+
+/*
+ * Runs from boot, whatever the device is doing, and checks every second:
+ *  - the LCD switches from the AP's credentials to goodtogo.local when a client joins the AP
  *  - the AP is stopped once its last client leaves and the station is connected, the user then
  *    reaches goodtogo.local over the home network
- *  - after SETUP_IDLE_TIMEOUT_US without a request the device restarts if it still isn't
- *    configured, or stops the server, mDNS and the AP once it is
+ *  - the configuration server, mDNS and the AP are stopped once the configuration is valid and
+ *    the server has had no request for 5 minutes
+ *  - the device goes to deep sleep after 5 minutes without any activity, see last_activity_us()
  */
-static void setup_task(void *arg)
+static void watch_task(void *arg)
 {
+    gtg_app_handle_t app = arg;
+
+    /* whether the AP had a client at the last check */
+    bool ap_had_client = false;
+
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(SETUP_CHECK_PERIOD_MS));
+        vTaskDelay(pdMS_TO_TICKS(WATCH_PERIOD_MS));
 
         uint32_t flags = gtg_dev_config_get_flags();
+        int64_t now = esp_timer_get_time();
+
+        xSemaphoreTake(app->mode_lock, portMAX_DELAY);
+
+        /* the AP's credentials are shown until a client joins, then the address it surfs to */
+        bool ap_has_client = wifi_softap_is_running() && wifi_softap_has_client();
+        if (ap_has_client && !ap_had_client) {
+            gtg_lcd_print(&app->lcd, "Surf to webpage:", GTG_CONFIG_URL);
+        }
+        ap_had_client = ap_has_client;
 
         if (wifi_softap_is_running() && !wifi_softap_has_client() && (flags & GTG_DEV_FLAG_CONNECTED)) {
             ESP_LOGI(TAG, "the client left the AP and the device is connected, stopping the AP");
             wifi_softap_deinit();
         }
 
-        if (esp_timer_get_time() - gtg_https_server_last_activity_us() < SETUP_IDLE_TIMEOUT_US) {
-            continue;
+        if (gtg_https_server_is_running() && (flags & GTG_DEV_FLAG_VALID_CONFIG)
+            && now - gtg_https_server_last_activity_us() >= SERVER_IDLE_TIMEOUT_US) {
+            ESP_LOGI(TAG, "configured and the configuration was idle for 5 minutes, stopping it");
+            config_mode_stop_locked();
         }
 
-        if (!(flags & GTG_DEV_FLAG_VALID_CONFIG)) {
-            /* TODO: deep sleep instead, woken by the button */
-            ESP_LOGW(TAG, "not configured and the configuration was idle for 5 minutes, restarting");
-            esp_restart();
-        }
+        xSemaphoreGive(app->mode_lock);
 
-        ESP_LOGI(TAG, "configured and the configuration was idle for 5 minutes, stopping it");
-        if (wifi_softap_is_running()) {
-            wifi_softap_deinit();
+        if (now - last_activity_us() >= SLEEP_IDLE_TIMEOUT_US) {
+            go_to_sleep(app);
         }
-        gtg_https_server_deinit();
-        gtg_mdns_deinit();
-        break;
     }
-
-    vTaskDelete(NULL);
 }
 
 /*
- * Starts the configuration at goodtogo.local and waits until the configuration is valid. The AP
- * is only started when the station isn't connected. setup_task() restarts the device if the
- * configuration is left idle.
+ * Starts the configuration at goodtogo.local and waits until the configuration is valid.
+ * watch_task() puts the device to sleep if the configuration is left idle.
  */
 static void run_configuration(gtg_app_handle_t app)
 {
-    char top_msg[17];
-    char bot_msg[17];
+    ESP_ERROR_CHECK(config_mode_start(app));
 
-    /* the server and mDNS answer on every interface, so the page is also reachable at
-     * goodtogo.local on the user's network once the station is connected */
-    ESP_ERROR_CHECK(gtg_mdns_init());
-    ESP_ERROR_CHECK(gtg_https_server_init());
-
-    if (xTaskCreate(setup_task, "gtg setup", SETUP_TASK_STACK_SIZE, NULL, SETUP_TASK_PRIORITY, NULL) != pdPASS) {
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
-
-    if (!(gtg_dev_config_get_flags() & GTG_DEV_FLAG_CONNECTED)) {
-        wifi_softap_init(&app->ap_cred);
-        snprintf(top_msg, sizeof(top_msg), "WIFI: %s", app->ap_cred.ssid);
-        snprintf(bot_msg, sizeof(bot_msg), "PASS: %s", app->ap_cred.pass);
-        gtg_lcd_print(&app->lcd, top_msg, bot_msg);
-
-        /* polled, as setup_task() may stop the AP meanwhile */
+    if (wifi_softap_is_running()) {
+        /* polled, as watch_task() may stop the AP meanwhile */
         while (!wifi_softap_has_client() && !(gtg_dev_config_get_flags() & GTG_DEV_FLAG_CONNECTED)) {
             vTaskDelay(pdMS_TO_TICKS(AP_CLIENT_POLL_MS));
         }
@@ -353,6 +468,14 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
         return ESP_ERR_NO_MEM;
     }
 
+    gtg_sleep_log_wakeup();
+
+    app->mode_lock = xSemaphoreCreateMutex();
+    if (app->mode_lock == NULL) {
+        free(app);
+        return ESP_ERR_NO_MEM;
+    }
+
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -381,6 +504,12 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
         gtg_lcd_print(&app->lcd, "Configuring...", "Soon good to go!");
     }
 
+    /* after the LCD, which it prints the sleep message on. The idle time counts from the event
+     * queue's init, which is from boot */
+    if (xTaskCreate(watch_task, "gtg watch", WATCH_TASK_STACK_SIZE, app, WATCH_TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+
     ESP_ERROR_CHECK(gtg_dev_config_init());
     ESP_ERROR_CHECK(wifi_station_init());
     ESP_ERROR_CHECK(gtg_api_keys_init());
@@ -405,11 +534,64 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
         run_configuration(app);
     }
 
-    app->index = 0;
-
     *out_app = app;
 
     return ESP_OK;
+}
+
+/* Copies the targets again when they were reconfigured, which clears the cache */
+static void sync_cache(gtg_app_handle_t app)
+{
+    if (gtg_cache_sync(&app->cache)) {
+        ESP_LOGI(TAG, "the departures were reconfigured, starting from the first");
+        app->index = 0;
+    }
+}
+
+/* Refreshes the chosen departure when its information is 60 s or older and logs it. After the
+ * last departure the end message is shown instead */
+static void show_chosen(gtg_app_handle_t app)
+{
+    uint32_t flags = gtg_dev_config_get_flags();
+    if (!(flags & GTG_DEV_FLAG_VALID_CONFIG)) {
+        ESP_LOGW(TAG, "no departures can be fetched, the configuration isn't valid");
+        print_error_state_with_delay(app, ~flags, 0);
+        return;
+    }
+
+    sync_cache(app);
+
+    if (app->index >= app->cache.len) {
+        ESP_LOGI(TAG, "after the last departure, hold 5 seconds to add more");
+        gtg_lcd_print(&app->lcd, END_MSG_TOP, END_MSG_BOTTOM);
+        return;
+    }
+
+    /* the departures are only logged for now */
+    gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+    gtg_cache_refresh(&app->cache, app->index);
+    gtg_cache_log(&app->cache, app->index);
+}
+
+/* Moves to the next departure, or the end message after the last one, then wraps around */
+static void choose_next(gtg_app_handle_t app)
+{
+    if (gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG) {
+        sync_cache(app);
+        app->index = (app->index + 1) % (app->cache.len + 1);
+    }
+
+    show_chosen(app);
+}
+
+static void toggle_config_mode(gtg_app_handle_t app)
+{
+    if (gtg_https_server_is_running()) {
+        config_mode_stop(app);
+        gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+    } else {
+        config_mode_start(app);
+    }
 }
 
 esp_err_t gtg_app_run(gtg_app_handle_t app) {
@@ -423,26 +605,30 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
         app->event_task = NULL;
     }
 
-    gtg_lcd_print(&app->lcd, "U R Good To Go!", "Press to search.");
+    /* every departure is fetched once, one request per stop */
+    gtg_lcd_print(&app->lcd, "Fetching...", "");
+    sync_cache(app);
+    app->index = 0;
+    gtg_cache_refresh_all(&app->cache);
+
+    gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
 
     gtg_event_t event;
-    uint32_t flags;
 
     while (true) {
-        if (gtg_events_receive(&event, pdMS_TO_TICKS(EVENT_TASK_TIMEOUT_MS)) == ESP_OK) {
-            flags = gtg_dev_config_get_flags();
-
+        /* watch_task() puts the device to sleep after 5 minutes without an event */
+        if (gtg_events_receive(&event, portMAX_DELAY) == ESP_OK) {
             switch(event.type) {
                 case GTG_EV_BUTTON_CLICKED:
-                    if (flags & GTG_DEV_FLAG_VALID_CONFIG) {
-                        // Fetch the information for current index and increase by one.
-                    } else {
-                        // print error message and wait for user to initiate configuration mode.
-                    }
+                    show_chosen(app);
+                    break;
+
+                case GTG_EV_BUTTON_DOUBLE_CLICKED:
+                    choose_next(app);
                     break;
 
                 case GTG_EV_BUTTON_SHORT_HOLD:
-                    // start configuration mode
+                    toggle_config_mode(app);
                     break;
 
                 case GTG_EV_BUTTON_LONG_HOLD:
@@ -468,7 +654,5 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
 
             log_event(&event);
         }
-
-        // timeout reached, device go to sleep.
     }
 }

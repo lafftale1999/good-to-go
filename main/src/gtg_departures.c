@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_http_client.h"
@@ -24,6 +25,9 @@
 #define DEPARTURES_URL          "https://realtime-api.trafiklab.se/v1/departures/%s/%s?key=%s"
 #define SAMPLE_TIME_LEN         sizeof("YYYY-MM-DDTHH:mm")
 #define DEPARTURES_URL_MAX_LEN  (sizeof(DEPARTURES_URL) + GTG_STOP_ID_MAX_LEN + SAMPLE_TIME_LEN + GTG_API_KEY_MAX_LEN)
+
+/* without a time the departures from now on are returned, shorter than DEPARTURES_URL */
+#define UPCOMING_URL            "https://realtime-api.trafiklab.se/v1/departures/%s?key=%s"
 
 /* 8 samples from 00:00 end at 20:53, all within the day */
 #define SAMPLE_DAY              3       /* tm_wday of Wednesday */
@@ -50,7 +54,15 @@ static const char *TAG = "departures";
  *     ]
  *   }
  */
-typedef struct {
+typedef struct departure_stream departure_stream_t;
+
+/* Called for each departure with a route, *option is its line, mode and destination */
+typedef void (*departure_handler_t)(departure_stream_t *stream, const cJSON *json,
+                                    const gtg_departure_option_t *option);
+
+struct departure_stream {
+    departure_handler_t on_departure;
+
     int    depth;
     bool   in_string;
     bool   escape;
@@ -64,12 +76,21 @@ typedef struct {
     bool   collecting;
     bool   too_long;
 
+    size_t departures;          /* departures seen */
+    size_t skipped;             /* departures too long or not understood */
+
+    /* gtg_departures_list_options() */
     gtg_departure_option_t *options;
     size_t                  count;
-    size_t                  departures;     /* departures seen */
-    size_t                  skipped;        /* departures too long or not understood */
     size_t                  dropped;        /* unique options that didn't fit */
-} departure_stream_t;
+
+    /* gtg_departures_fetch_upcoming() */
+    const gtg_departure_option_t *targets;
+    size_t                        target_count;
+    gtg_departures_upcoming_t    *upcoming;
+    time_t                        now;
+    size_t                        matched;  /* departures that matched a target in the window */
+};
 
 static bool is_valid_stop_id(const char *id)
 {
@@ -94,7 +115,8 @@ static bool same_option(const gtg_departure_option_t *a, const gtg_departure_opt
         && strcmp(a->destination, b->destination) == 0;
 }
 
-static void add_option(departure_stream_t *stream, const gtg_departure_option_t *option)
+/* The departure handler of gtg_departures_list_options(), keeps each unique option */
+static void add_option(departure_stream_t *stream, const cJSON *json, const gtg_departure_option_t *option)
 {
     for (size_t i = 0; i < stream->count; i++) {
         if (same_option(&stream->options[i], option)) {
@@ -109,7 +131,81 @@ static void add_option(departure_stream_t *stream, const gtg_departure_option_t 
     }
 }
 
-/* Reads the route of one departure into an option */
+/* Reads a local time like "2026-10-31T12:37:22", as Trafiklab sends them */
+static bool parse_local_time(const char *text, time_t *out)
+{
+    struct tm tm = { 0 };
+    if (text == NULL || sscanf(text, "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+                               &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) {
+        return false;
+    }
+
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    /* daylight saving time is worked out by mktime from the TZ set in gtg_ntp.c */
+    tm.tm_isdst = -1;
+
+    *out = mktime(&tm);
+    return *out != (time_t)-1;
+}
+
+/* Puts seconds into the upcoming departures, which are kept as the soonest ones, in order */
+static void insert_upcoming(gtg_departures_upcoming_t *upcoming, uint16_t seconds)
+{
+    size_t pos = upcoming->count;
+    while (pos > 0 && upcoming->seconds[pos - 1] > seconds) {
+        pos--;
+    }
+    if (pos >= GTG_DEPARTURES_UPCOMING_MAX) {
+        return;
+    }
+
+    size_t last = upcoming->count < GTG_DEPARTURES_UPCOMING_MAX ? upcoming->count : GTG_DEPARTURES_UPCOMING_MAX - 1;
+    for (size_t i = last; i > pos; i--) {
+        upcoming->seconds[i] = upcoming->seconds[i - 1];
+    }
+    upcoming->seconds[pos] = seconds;
+
+    if (upcoming->count < GTG_DEPARTURES_UPCOMING_MAX) {
+        upcoming->count++;
+    }
+}
+
+/* The departure handler of gtg_departures_fetch_upcoming(). A departure within the window is
+ * added to every target it matches, canceled ones are skipped */
+static void add_upcoming(departure_stream_t *stream, const cJSON *json, const gtg_departure_option_t *option)
+{
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "canceled"))) {
+        return;
+    }
+
+    /* the realtime estimate when there is one, the timetable otherwise */
+    const char *when = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "realtime"));
+    if (when == NULL) {
+        when = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "scheduled"));
+    }
+
+    time_t departs;
+    if (!parse_local_time(when, &departs)) {
+        stream->skipped++;
+        return;
+    }
+
+    /* a delayed departure can be listed although it has left */
+    double seconds = difftime(departs, stream->now);
+    if (seconds < 0 || seconds > GTG_DEPARTURES_UPCOMING_WINDOW_S) {
+        return;
+    }
+
+    for (size_t i = 0; i < stream->target_count; i++) {
+        if (same_option(&stream->targets[i], option)) {
+            insert_upcoming(&stream->upcoming[i], (uint16_t)seconds);
+            stream->matched++;
+        }
+    }
+}
+
+/* Reads the route of one departure into an option and hands it to the stream's handler */
 static void parse_departure(departure_stream_t *stream)
 {
     cJSON *json = cJSON_ParseWithLength(stream->departure, stream->departure_len);
@@ -127,11 +223,12 @@ static void parse_departure(departure_stream_t *stream)
     if (mode == NULL || destination == NULL) {
         stream->skipped++;
     } else {
+        /* copied like the saved targets are, so they compare equal */
         gtg_departure_option_t option;
         gtg_copy_utf8(option.line, sizeof(option.line), line != NULL ? line : "");
         gtg_copy_utf8(option.mode, sizeof(option.mode), mode);
         gtg_copy_utf8(option.destination, sizeof(option.destination), destination);
-        add_option(stream, &option);
+        stream->on_departure(stream, json, &option);
     }
 
     cJSON_Delete(json);
@@ -351,8 +448,9 @@ esp_err_t gtg_departures_list_options(const char *stop_id, gtg_departure_option_
     }
 
     departure_stream_t stream = {
-        .departure = malloc(DEPARTURE_JSON_MAX_LEN),
-        .options   = options,
+        .on_departure = add_option,
+        .departure    = malloc(DEPARTURE_JSON_MAX_LEN),
+        .options      = options,
     };
 
     /* the URL is set per sample, the first one only creates the client */
@@ -419,6 +517,76 @@ esp_err_t gtg_departures_list_options(const char *stop_id, gtg_departure_option_
 
     qsort(options, stream.count, sizeof(options[0]), compare_options);
     *count = stream.count;
+
+    return ESP_OK;
+}
+
+esp_err_t gtg_departures_fetch_upcoming(const char *stop_id, const gtg_departure_option_t *targets,
+                                        size_t count, gtg_departures_upcoming_t *upcoming,
+                                        time_t *fetched_at)
+{
+    if (stop_id == NULL || targets == NULL || upcoming == NULL || fetched_at == NULL
+        || count == 0 || !is_valid_stop_id(stop_id)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(upcoming, 0, count * sizeof(upcoming[0]));
+
+    if (!gtg_ntp_is_time_set()) {
+        return ESP_ERR_NOT_FINISHED;
+    }
+
+    char key[GTG_API_KEY_MAX_LEN + 1];
+    if (gtg_dev_config_get_api_key(GTG_API_KEY_TRAFIKLAB, key, sizeof(key)) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    departure_stream_t stream = {
+        .on_departure = add_upcoming,
+        .departure    = malloc(DEPARTURE_JSON_MAX_LEN),
+        .targets      = targets,
+        .target_count = count,
+        .upcoming     = upcoming,
+        .now          = time(NULL),
+    };
+
+    char url[DEPARTURES_URL_MAX_LEN];
+    snprintf(url, sizeof(url), UPCOMING_URL, stop_id, key);
+
+    esp_http_client_config_t config = {
+        .url               = url,
+        .timeout_ms        = API_REQUEST_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler     = http_event_handler,
+        .user_data         = &stream,
+    };
+
+    esp_http_client_handle_t client = stream.departure != NULL ? esp_http_client_init(&config) : NULL;
+    esp_err_t err = client != NULL ? esp_http_client_set_header(client, "Accept", "application/json")
+                                   : ESP_ERR_NO_MEM;
+    if (err == ESP_OK) {
+        err = fetch_sample(client, url, &stream);
+    }
+
+    if (client != NULL) {
+        esp_http_client_cleanup(client);
+    }
+    memset(url, 0, sizeof(url));
+    memset(key, 0, sizeof(key));
+    free(stream.departure);
+
+    if (err != ESP_OK) {
+        /* a cut response may have filled some, they aren't complete */
+        memset(upcoming, 0, count * sizeof(upcoming[0]));
+        ESP_LOGW(TAG, "upcoming departures from %s failed: %s", stop_id, esp_err_to_name(err));
+        return err;
+    }
+
+    *fetched_at = stream.now;
+
+    ESP_LOGI(TAG, "%u departures from %s, %u matched %u targets within %d s, %u skipped",
+             (unsigned)stream.departures, stop_id, (unsigned)stream.matched, (unsigned)count,
+             GTG_DEPARTURES_UPCOMING_WINDOW_S, (unsigned)stream.skipped);
 
     return ESP_OK;
 }
