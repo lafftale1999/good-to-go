@@ -2,6 +2,7 @@
 #define GTG_LCD_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/i2c_master.h"
@@ -40,7 +41,24 @@ typedef struct {
 esp_err_t gtg_lcd_init(gtg_lcd_module_t *lcd);
 
 /**
+ * \brief Converts UTF-8 text to the characters the LCD can show
+ *
+ * The LCD has no å, ä or ö, so they become a, a and o, Å, Ä and Ö become A, A and O, and a few
+ * other accented letters lose their accent. Any other non-ASCII character becomes '?'. Each
+ * character takes one byte afterwards, so the length is what the screen shows.
+ *
+ * \param *dst       receives the text, cut to fit
+ * \param dst_size   size of dst
+ * \param *src       UTF-8 text, NULL for ""
+ *
+ * \return the length of dst
+ */
+size_t gtg_lcd_to_ascii(char *dst, size_t dst_size, const char *src);
+
+/**
  * \brief Shows two lines, each cut to GTG_LCD_COLUMNS characters
+ *
+ * The lines are converted with gtg_lcd_to_ascii() first.
  *
  * Only a row that changed is written, so e.g. updating the times on the bottom row leaves the
  * top row untouched. Nothing is written when the screen already shows the same lines.

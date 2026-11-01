@@ -64,6 +64,24 @@ esp_err_t gtg_cache_refresh(gtg_departure_cache_t *cache, size_t index);
 void gtg_cache_refresh_all(gtg_departure_cache_t *cache);
 
 /**
+ * \brief Whether the node at index was fetched less than GTG_CACHE_MAX_AGE_S ago, so
+ *        gtg_cache_refresh() makes no request
+ */
+bool gtg_cache_is_fresh(const gtg_departure_cache_t *cache, size_t index);
+
+/**
+ * \brief The seconds from now to the coming departures of the target at index
+ *
+ * Departures that have left since the fetch are skipped. Nothing is fetched.
+ *
+ * \param *remaining  receives the seconds, soonest first
+ *
+ * \return the number of departures in remaining, 0 also when the fetch failed, see the status
+ */
+size_t gtg_cache_remaining(const gtg_departure_cache_t *cache, size_t index,
+                           int32_t remaining[GTG_DEPARTURES_UPCOMING_MAX]);
+
+/**
  * \brief Logs the target at index and its coming departures, counted from now
  */
 void gtg_cache_log(const gtg_departure_cache_t *cache, size_t index);

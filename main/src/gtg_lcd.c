@@ -48,10 +48,76 @@ esp_err_t gtg_lcd_init(gtg_lcd_module_t *lcd)
     return ESP_OK;
 }
 
-/* Copies a line, cut to the width of the screen */
+/* The LCD for a two byte UTF-8 character starting with 0xC3, '?' when it has none */
+static char latin1_supplement(unsigned char second)
+{
+    switch (second) {
+    case 0xA5: /* å */
+    case 0xA4: /* ä */
+    case 0xA0: /* à */
+    case 0xA1: /* á */
+        return 'a';
+    case 0x85: /* Å */
+    case 0x84: /* Ä */
+        return 'A';
+    case 0xB6: /* ö */
+    case 0xB8: /* ø */
+        return 'o';
+    case 0x96: /* Ö */
+    case 0x98: /* Ø */
+        return 'O';
+    case 0xA9: /* é */
+    case 0xA8: /* è */
+        return 'e';
+    case 0x89: /* É */
+        return 'E';
+    case 0xBC: /* ü */
+        return 'u';
+    case 0x9C: /* Ü */
+        return 'U';
+    default:
+        return '?';
+    }
+}
+
+size_t gtg_lcd_to_ascii(char *dst, size_t dst_size, const char *src)
+{
+    if (dst == NULL || dst_size == 0) {
+        return 0;
+    }
+
+    size_t len = 0;
+    const unsigned char *s = (const unsigned char *)(src != NULL ? src : "");
+
+    while (*s != '\0' && len < dst_size - 1) {
+        if (*s < 0x80) {
+            dst[len++] = (char)*s++;
+            continue;
+        }
+
+        /* the length of the sequence from its first byte, a stray continuation byte is one */
+        size_t seq = (*s & 0xE0) == 0xC0 ? 2 : (*s & 0xF0) == 0xE0 ? 3 : (*s & 0xF8) == 0xF0 ? 4 : 1;
+
+        char c = '?';
+        if (seq == 2 && s[0] == 0xC3 && (s[1] & 0xC0) == 0x80) {
+            c = latin1_supplement(s[1]);
+        }
+        dst[len++] = c;
+
+        /* a cut sequence at the end of the text stops at its NUL */
+        for (size_t i = 0; i < seq && *s != '\0'; i++) {
+            s++;
+        }
+    }
+
+    dst[len] = '\0';
+    return len;
+}
+
+/* Copies a line as the LCD shows it, cut to the width of the screen */
 static void copy_line(char *dst, const char *src)
 {
-    strlcpy(dst, src != NULL ? src : "", GTG_LCD_COLUMNS + 1);
+    gtg_lcd_to_ascii(dst, GTG_LCD_COLUMNS + 1, src);
 }
 
 esp_err_t gtg_lcd_print(gtg_lcd_module_t *lcd, const char *top, const char *bottom)

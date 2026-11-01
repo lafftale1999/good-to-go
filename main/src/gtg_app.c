@@ -73,6 +73,10 @@ struct gtg_app {
 
     /* the chosen departure, cache.len is the end message after the last one */
     size_t                  index;
+
+    /* while a departure is shown, it is drawn again at redraw_at for its times to count down */
+    bool                    redraw;
+    TickType_t              redraw_at;
     TaskHandle_t            event_task;
     bool                    ntp_started;
 
@@ -548,13 +552,103 @@ static void sync_cache(gtg_app_handle_t app)
     }
 }
 
-/* Refreshes the chosen departure when its information is 60 s or older and logs it. After the
- * last departure the end message is shown instead */
+/* The top row of a departure: its line and destination. A longer name than the screen is cut,
+ * with a '.' as its last character */
+static void format_departure_name(const trafiklab_target_t *target, char top[GTG_LCD_COLUMNS + 1])
+{
+    char name[GTG_DEPARTURE_LINE_MAX_LEN + GTG_DEPARTURE_DEST_MAX_LEN + 2];
+    snprintf(name, sizeof(name), "%s %s", target->departure.line, target->departure.destination);
+
+    /* converted first, so the length is in the characters the LCD shows */
+    char shown[sizeof(name)];
+    size_t len = gtg_lcd_to_ascii(shown, sizeof(shown), name);
+
+    if (len > GTG_LCD_COLUMNS) {
+        shown[GTG_LCD_COLUMNS - 1] = '.';
+        shown[GTG_LCD_COLUMNS] = '\0';
+    }
+    strlcpy(top, shown, GTG_LCD_COLUMNS + 1);
+}
+
+/*
+ * Draws the chosen departure from the cache, without fetching: its name on the top row and the
+ * minutes to its coming departures on the bottom one, e.g. "now, 13, 28 min".
+ *
+ * \return ticks until a time on the screen changes, portMAX_DELAY when none will
+ */
+static TickType_t draw_departure(gtg_app_handle_t app)
+{
+    const gtg_departure_node_t *node = &app->cache.nodes[app->index];
+
+    char top[GTG_LCD_COLUMNS + 1];
+    format_departure_name(&app->cache.targets[app->index], top);
+
+    if (node->status != ESP_OK || node->ts == 0) {
+        gtg_lcd_print(&app->lcd, top, "Fetch failed");
+        return portMAX_DELAY;
+    }
+
+    int32_t remaining[GTG_DEPARTURES_UPCOMING_MAX];
+    size_t count = gtg_cache_remaining(&app->cache, app->index, remaining);
+    if (count == 0) {
+        gtg_lcd_print(&app->lcd, top, "No departures...");
+        return portMAX_DELAY;
+    }
+
+    char bottom[GTG_LCD_COLUMNS + 1] = "";
+    size_t used = 0;
+    int32_t next_change_s = INT32_MAX;
+
+    for (size_t i = 0; i < count; i++) {
+        const char *sep = i > 0 ? ", " : "";
+        int n = remaining[i] < 60
+            ? snprintf(bottom + used, sizeof(bottom) - used, "%snow", sep)
+            : snprintf(bottom + used, sizeof(bottom) - used, "%s%ld", sep, (long)(remaining[i] / 60));
+        if (n < 0 || (size_t)n >= sizeof(bottom) - used) {
+            break;
+        }
+        used += (size_t)n;
+
+        /* the shown minutes drop, or "now" departs, once the remainder of the minute is gone */
+        int32_t change_s = remaining[i] % 60 + 1;
+        if (change_s < next_change_s) {
+            next_change_s = change_s;
+        }
+    }
+
+    /* "now" alone needs no unit */
+    if (count > 1 || remaining[0] >= 60) {
+        strlcat(bottom, " min", sizeof(bottom));
+    }
+
+    gtg_lcd_print(&app->lcd, top, bottom);
+
+    return pdMS_TO_TICKS(next_change_s * 1000);
+}
+
+/* Stops redrawing, e.g. when the screen shows something else than a departure */
+static void stop_redraw(gtg_app_handle_t app)
+{
+    app->redraw = false;
+}
+
+/* Draws the chosen departure and plans the next redraw for when its times change */
+static void redraw_departure(gtg_app_handle_t app)
+{
+    TickType_t wait = draw_departure(app);
+
+    app->redraw = wait != portMAX_DELAY;
+    app->redraw_at = xTaskGetTickCount() + wait;
+}
+
+/* Refreshes the chosen departure when its information is 60 s or older, shows and logs it.
+ * After the last departure the end message is shown instead */
 static void show_chosen(gtg_app_handle_t app)
 {
     uint32_t flags = gtg_dev_config_get_flags();
     if (!(flags & GTG_DEV_FLAG_VALID_CONFIG)) {
         ESP_LOGW(TAG, "no departures can be fetched, the configuration isn't valid");
+        stop_redraw(app);
         print_error_state_with_delay(app, ~flags, 0);
         return;
     }
@@ -563,14 +657,20 @@ static void show_chosen(gtg_app_handle_t app)
 
     if (app->index >= app->cache.len) {
         ESP_LOGI(TAG, "after the last departure, hold 5 seconds to add more");
+        stop_redraw(app);
         gtg_lcd_print(&app->lcd, END_MSG_TOP, END_MSG_BOTTOM);
         return;
     }
 
-    /* the departures are only logged for now */
-    gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
-    gtg_cache_refresh(&app->cache, app->index);
+    if (!gtg_cache_is_fresh(&app->cache, app->index)) {
+        char top[GTG_LCD_COLUMNS + 1];
+        format_departure_name(&app->cache.targets[app->index], top);
+        gtg_lcd_print(&app->lcd, top, "Updating...");
+        gtg_cache_refresh(&app->cache, app->index);
+    }
+
     gtg_cache_log(&app->cache, app->index);
+    redraw_departure(app);
 }
 
 /* Moves to the next departure, or the end message after the last one, then wraps around */
@@ -586,6 +686,8 @@ static void choose_next(gtg_app_handle_t app)
 
 static void toggle_config_mode(gtg_app_handle_t app)
 {
+    stop_redraw(app);
+
     if (gtg_https_server_is_running()) {
         config_mode_stop(app);
         gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
@@ -616,8 +718,24 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
     gtg_event_t event;
 
     while (true) {
-        /* watch_task() puts the device to sleep after 5 minutes without an event */
-        if (gtg_events_receive(&event, portMAX_DELAY) == ESP_OK) {
+        /* the shown departure is redrawn when its times change, which isn't an event, so
+         * watch_task() still puts the device to sleep after 5 minutes without one */
+        TickType_t wait = portMAX_DELAY;
+        if (app->redraw) {
+            TickType_t now = xTaskGetTickCount();
+            /* wraps around like the tick count */
+            wait = (TickType_t)(app->redraw_at - now) <= (TickType_t)(portMAX_DELAY / 2)
+                 ? app->redraw_at - now : 0;
+        }
+
+        if (gtg_events_receive(&event, wait) != ESP_OK) {
+            if (app->redraw) {
+                redraw_departure(app);
+            }
+            continue;
+        }
+
+        {
             switch(event.type) {
                 case GTG_EV_BUTTON_CLICKED:
                     show_chosen(app);
