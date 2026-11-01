@@ -98,13 +98,19 @@ The screen then shows `U R Good To Go!` / `Press to search.` The setup page stay
 
 | Push                            | What happens                                                                  |
 |---------------------------------|-------------------------------------------------------------------------------|
-| **Click**                       | Shows the chosen departure. Fetches new times first if they are a minute or older. |
-| **Double-click**                | Moves to the next departure.                                                  |
-| **Hold 5 seconds**, then let go | Turns the setup page on or off.                                               |
+| **Click**                       | Shows the next departure. Fetches new times first if they are a minute or older. |
+| **Triple-click**                | Puts the device to sleep, see [Sleep](#sleep).                                |
+| **Hold 5 seconds**              | Turns the setup page on or off.                                               |
 | **Hold 20 seconds**             | Factory reset, see [Factory reset](#factory-reset).                           |
 
-A double-click is two clicks in quick succession. When you hold the button, count the seconds: letting go between 5
-and 20 seconds turns the setup page on or off, while at 20 seconds the factory reset starts at once.
+A click shows its departure after a short moment, as the device first checks that no more clicks follow. Two quick
+clicks move two departures forward, and a triple-click is three quick clicks.
+
+The holds happen while you still hold the button: at 5 seconds the setup page turns on or off, and you can let go.
+Keep holding to 20 seconds and the factory reset starts.
+
+**While the setup page is on, only the holds work.** Clicks and triple-clicks are ignored, so the password on the
+screen stays there. Hold the button for 5 seconds to turn the setup page off, then click as usual.
 
 ## Reading a departure
 
@@ -120,14 +126,14 @@ The times count down by themselves, and new times are fetched in the background 
 shown. Realtime estimates are used when the operator has them, otherwise the timetable. Cancelled departures and
 departures more than 60 minutes away are left out.
 
-After the last departure, a double-click shows `Need more stops?` / `Hold 5 sec...`, and the next one starts over from
-the first.
+The first click after `U R Good To Go!` shows the first departure. After the last departure, a click shows
+`Need more stops?` / `Hold 5 sec...`, and the next one starts over from the first.
 
 The screen has no å, ä or ö, so they are shown as a, a and o.
 
 # Changing the setup
 
-1. Hold the button for 5 seconds and let go.
+1. Hold the button for 5 seconds, until the screen changes.
 2. If the device is connected to your WiFi, the screen shows `goodtogo.local` and the login password. Open
    `https://goodtogo.local` from a phone or computer on the same network and log in with that password.
 
@@ -141,6 +147,9 @@ The screen has no å, ä or ö, so they are shown as a, a and o.
 
 After **5 minutes** without a button push, or without use of the setup page, the device shows
 `Going to sleep` / `Press to wake` and turns the screen off.
+
+**Triple-click the button to put it to sleep at once**, e.g. when you leave home. This doesn't work while the setup
+page is on: turn it off first by holding the button for 5 seconds.
 
 **Push the button once to wake it.** It then starts up again, which takes a few seconds: it connects to your WiFi,
 checks the keys and fetches all departures (`Fetching...`), then shows `U R Good To Go!`.
@@ -192,7 +201,7 @@ API keys on the setup page, and wait a few minutes before trying again. A fetch 
 
 * You are logged out after 5 minutes without using the page, and when the setup page is turned off. Log in again
   with the password on the screen.
-* If the screen no longer shows the password, e.g. after a click showed a departure, hold the button for 5 seconds
+* If the screen no longer shows the password, e.g. because someone already logged in, hold the button for 5 seconds
   twice: once to turn the setup page off and once to turn it on. The screen then shows a new password.
 * The browser must allow cookies for `goodtogo.local`, as that is how it stays logged in.
 
@@ -232,7 +241,8 @@ WiFi from the setup page.
 A factory reset erases the WiFi settings, the API keys you entered and all saved departures. API keys built into the
 device stay, and are used again after the reset.
 
-**Hold the button for 20 seconds.** The screen shows `Factory reset` / `Restarting...` and the device restarts into
+**Hold the button for 20 seconds.** At 5 seconds the setup page turns on or off as usual: keep holding. At 20
+seconds the screen shows `Factory reset` / `Restarting...` and the device restarts into
 [First-time setup](#first-time-setup). This works at any time, also during startup.
 
 # Privacy and security

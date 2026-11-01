@@ -21,8 +21,8 @@ typedef enum {
     GTG_EV_CONNECTION_FAILED,   /*!< the station gave up after its retries, see wifi.reason */
     GTG_EV_API_KEY_REJECTED,    /*!< a service rejected a key, at verification or in use, see api_key */
     GTG_EV_BUTTON_CLICKED,      /*!< a button was released within the short hold time, see button */
-    GTG_EV_BUTTON_DOUBLE_CLICKED, /*!< a button was clicked twice in a row, see button */
-    GTG_EV_BUTTON_SHORT_HOLD,   /*!< a button was released after the short hold time, see button */
+    GTG_EV_BUTTON_TRIPLE_CLICKED, /*!< a button was clicked three times in a row, see button */
+    GTG_EV_BUTTON_SHORT_HOLD,   /*!< a button has been held for the short hold time, still pushed, see button */
     GTG_EV_BUTTON_LONG_HOLD,    /*!< a button has been held for the long hold time, still pushed, see button */
     GTG_EV_CONFIG_APPLIED,      /*!< GTG_DEV_FLAG_VALID_CONFIG got set, or the user applied the valid
                                      configuration with the "Done" button, see /api/config/apply */
@@ -47,7 +47,7 @@ typedef struct {
 
         struct {
             uint8_t id;
-        } button;               /*!< GTG_EV_BUTTON_CLICKED, _DOUBLE_CLICKED, _SHORT_HOLD and _LONG_HOLD */
+        } button;               /*!< GTG_EV_BUTTON_CLICKED, _TRIPLE_CLICKED, _SHORT_HOLD and _LONG_HOLD */
     };
 } gtg_event_t;
 

@@ -176,7 +176,7 @@ static void log_event(const gtg_event_t *event)
                  event->api_key.which == GTG_API_KEY_TRAFIKLAB ? "Trafiklab" : "Google");
         break;
     case GTG_EV_BUTTON_CLICKED:
-    case GTG_EV_BUTTON_DOUBLE_CLICKED:
+    case GTG_EV_BUTTON_TRIPLE_CLICKED:
     case GTG_EV_BUTTON_SHORT_HOLD:
     case GTG_EV_BUTTON_LONG_HOLD:
         ESP_LOGI(TAG, "event: %s, button %u", gtg_event_type_name(event->type), event->button.id);
@@ -217,6 +217,28 @@ static void show_config_logged_in(gtg_app_handle_t app)
     gtg_lcd_print(&app->lcd, "Configuring...", "");
 }
 
+/* Whether the event is one the configuration takes: anything but a click or a triple click. In
+ * the configuration only the short hold, which leaves it, and the long hold, which factory
+ * resets, act on the button */
+static bool is_config_button(gtg_event_type_t type)
+{
+    return type != GTG_EV_BUTTON_CLICKED && type != GTG_EV_BUTTON_TRIPLE_CLICKED;
+}
+
+/* Shows the sleep message and goes to deep sleep, from which the button wakes the device by
+ * restarting it. Doesn't return */
+static void go_to_sleep(gtg_app_handle_t app, const char *reason)
+{
+    ESP_LOGI(TAG, "%s, going to sleep", reason);
+
+    gtg_lcd_print(&app->lcd, "Going to sleep", "Press to wake");
+    vTaskDelay(pdMS_TO_TICKS(SLEEP_MESSAGE_MS));
+    gtg_lcd_clear(&app->lcd);
+    gtg_lcd_set_backlight(&app->lcd, false);
+
+    gtg_sleep_start();
+}
+
 /* Erases the stored configuration and restarts, which brings the device back to its first boot
  * and into the configuration. On a failed erase the device keeps running, a restart would only
  * load the old configuration again */
@@ -237,8 +259,10 @@ static void factory_reset(gtg_app_handle_t app)
 
 /* Consumes the events while gtg_app_init() runs, so the queue doesn't fill up. gtg_app_run()
  * stops it and takes over the queue, as the events would otherwise be split between them.
- * The device isn't clickable until it has started, so clicks and short holds are only logged,
- * while the long hold factory resets, so a device stuck in the configuration can be reset */
+ * Until it has started the device is in the configuration, where only the holds act, see
+ * is_config_button(). The configuration can't be left before it is valid, so the short hold is
+ * only logged, while the long hold factory resets, so a device stuck in the configuration can be
+ * reset */
 static void event_task(void *arg)
 {
     gtg_app_handle_t app = arg;
@@ -251,7 +275,7 @@ static void event_task(void *arg)
 
         switch (event.type) {
         case GTG_EV_BUTTON_CLICKED:
-        case GTG_EV_BUTTON_DOUBLE_CLICKED:
+        case GTG_EV_BUTTON_TRIPLE_CLICKED:
         case GTG_EV_BUTTON_SHORT_HOLD:
             ESP_LOGI(TAG, "event: %s, ignored until the device has started", gtg_event_type_name(event.type));
             break;
@@ -382,18 +406,6 @@ static int64_t last_activity_us(void)
     return events > server ? events : server;
 }
 
-static void go_to_sleep(gtg_app_handle_t app)
-{
-    ESP_LOGI(TAG, "no activity for 5 minutes, going to sleep");
-
-    gtg_lcd_print(&app->lcd, "Going to sleep", "Press to wake");
-    vTaskDelay(pdMS_TO_TICKS(SLEEP_MESSAGE_MS));
-    gtg_lcd_clear(&app->lcd);
-    gtg_lcd_set_backlight(&app->lcd, false);
-
-    gtg_sleep_start();
-}
-
 /* Stops the AP, the server and mDNS, whichever run. Called with mode_lock held */
 static void config_mode_stop_locked(void)
 {
@@ -510,7 +522,7 @@ static void watch_task(void *arg)
         xSemaphoreGive(app->mode_lock);
 
         if (now - last_activity_us() >= SLEEP_IDLE_TIMEOUT_US) {
-            go_to_sleep(app);
+            go_to_sleep(app, "no activity for 5 minutes");
         }
     }
 }
@@ -635,8 +647,8 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
 static void sync_cache(gtg_app_handle_t app)
 {
     if (gtg_cache_sync(&app->cache)) {
-        ESP_LOGI(TAG, "the departures were reconfigured, starting from the first");
-        app->index = 0;
+        ESP_LOGI(TAG, "the departures were reconfigured, the next click shows the first");
+        app->index = app->cache.len;
     }
 }
 
@@ -854,6 +866,15 @@ static void choose_next(gtg_app_handle_t app)
     show_chosen(app);
 }
 
+/* The start message, which takes the place of the end message: the next click wraps around to
+ * the first departure */
+static void show_start(gtg_app_handle_t app)
+{
+    stop_redraw(app);
+    app->index = app->cache.len;
+    gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+}
+
 /* In the configuration mode with a valid configuration, tells the user how to stop it.
  * \return true when shown */
 static bool show_config_hint(gtg_app_handle_t app)
@@ -873,7 +894,7 @@ static void toggle_config_mode(gtg_app_handle_t app)
 
     if (gtg_https_server_is_running()) {
         config_mode_stop(app);
-        gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+        show_start(app);
     } else {
         config_mode_start(app);
     }
@@ -908,7 +929,7 @@ static void on_connection_changed(gtg_app_handle_t app, const gtg_event_t *event
     if (app->resume_redraw && app->index < app->cache.len) {
         redraw_departure(app);
     } else if (!show_config_hint(app)) {
-        gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+        show_start(app);
     }
 }
 
@@ -952,7 +973,9 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
      * stop, so the later ones on a fetched stop are fresh and make no request */
     gtg_lcd_print(&app->lcd, "Fetching...", "");
     sync_cache(app);
-    app->index = 0;
+
+    /* before the first departure, so the first click shows it */
+    app->index = app->cache.len;
 
     bool config_started = false;
     for (size_t i = 0; i < app->cache.len && !config_started; i++) {
@@ -961,7 +984,7 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
 
     /* after the first setup the configuration mode is still on */
     if (!config_started && !show_config_hint(app)) {
-        gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+        show_start(app);
     }
 
     gtg_event_t event;
@@ -984,15 +1007,22 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
             continue;
         }
 
+        /* the clicks would change the screen, which shows the login password or the configuration */
+        if (gtg_https_server_is_running() && !is_config_button(event.type)) {
+            ESP_LOGI(TAG, "event: %s, ignored during the configuration", gtg_event_type_name(event.type));
+            continue;
+        }
+
         {
             switch(event.type) {
                 case GTG_EV_BUTTON_CLICKED:
-                    show_chosen(app);
-                    break;
-
-                case GTG_EV_BUTTON_DOUBLE_CLICKED:
                     choose_next(app);
                     break;
+
+                case GTG_EV_BUTTON_TRIPLE_CLICKED:
+                    log_event(&event);
+                    go_to_sleep(app, "triple-click");
+                    continue;
 
                 case GTG_EV_BUTTON_SHORT_HOLD:
                     toggle_config_mode(app);
