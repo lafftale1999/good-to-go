@@ -16,7 +16,8 @@ It has saved me a lot of trouble and freezing, and I hope it can help you too!
 * Shows up to 8 departures you choose, one at a time, on a 16x2 LCD: the line and destination on the top row and the
   next 3 departures on the bottom row, e.g. `3, 13, 28 min`.
 * The times count down by themselves and are fetched again in the background every minute while shown.
-* Everything is set up from your phone or computer at `https://goodtogo.local`: WiFi, API keys and departures.
+* Everything is set up from your phone or computer at `https://goodtogo.local`: WiFi, API keys and departures. The
+  page is protected by a password that the device shows on its screen, so only someone at the device can log in.
 * One button controls it:
 
   | Push                   | Action                                                         |
@@ -84,7 +85,8 @@ Running the script again makes a new device certificate signed by the same autho
 trust `ca.pem` once. `--force-ca` makes a new authority too. Everything in `cred/` except the scripts and
 `api_roots.pem` stays out of Git.
 
-**Trusting `ca.pem`** (optional, but without it the browser warns that the page isn't secure):
+**Trusting `ca.pem`** (recommended: without it the browser warns that the page isn't secure, and can't tell the
+device from someone imitating it when you log in):
 
 * **Windows:** `certutil -addstore -user Root cred\ca.pem`
 * **macOS:** open `ca.pem` in Keychain Access, then set *Trust → When using this certificate* to *Always Trust*.
@@ -202,7 +204,8 @@ device's log, quit it with `Ctrl+]`.
 
 1. The LCD shows the name and password of the device's own WiFi network, `GTG` followed by digits. Join it with your
    phone or computer.
-2. Open **`https://goodtogo.local`**.
+2. The LCD now shows `goodtogo.local` and the login password, e.g. `PASS: K7MPX2RQ9D`. Open
+   **`https://goodtogo.local`** and log in with that password. The LCD then shows `Configuring...`.
 3. Follow the steps on the page:
    1. **WiFi:** choose your home network and enter its password. The device's own network shuts down once you leave
       it, and the page is then reachable at `https://goodtogo.local` on your home network.
@@ -211,7 +214,22 @@ device's log, quit it with `Ctrl+]`.
    4. **Done.**
 4. The device shows `U R Good To Go!`. Click the button to see the first departure.
 
-To change the setup later, hold the button for 5 seconds and open `https://goodtogo.local` again.
+To change the setup later, hold the button for 5 seconds, open `https://goodtogo.local` again and log in with the
+password on the LCD.
+
+### How the login works
+
+* A new password is made every time the configuration mode starts: 10 capital letters and digits, without the
+  easily mixed up I, O, 0 and 1. Small letters are accepted when typing it.
+* `POST /api/login` with the right password starts a session. The browser stores its random token in an `HttpOnly`,
+  `Secure`, `SameSite=Strict` cookie and sends it with every request.
+* A session ends 5 minutes after its last successful request, one answered with a `2xx` status: only those renew
+  it. All sessions end when the configuration mode stops. Up to 4 browsers can be logged in at a time.
+* Every API endpoint but the login answers `401` without a valid session, and the page then shows the login form.
+  The page's own files are open, as the login form is part of them.
+* After 5 wrong passwords in a row, the login is locked for 30 seconds.
+* Only successful logged in requests count as activity, so neither someone who isn't logged in nor a request that
+  keeps failing can keep the configuration mode or the device awake.
 
 ---
 
@@ -231,13 +249,18 @@ To change the setup later, hold the button for 5 seconds and open `https://goodt
   reconnect by itself after that, even if the network comes back: reconnect it from the configuration page, or press
   the button to wake it from sleep, which restarts it.
 * After 3 failed fetches in a row the configuration mode starts.
-* A configuration page left open on the API keys step keeps the configuration mode running, as the page checks
-  the device every 3 seconds.
+* A configuration page left open and logged in on the API keys step keeps the configuration mode running, as the page
+  checks the device every 3 seconds.
+* The login password is only on the LCD until something else is shown there, e.g. a departure after a click. To see
+  a password again, turn the configuration mode off and on, which makes a new one.
 
 **Security**
 
-* The configuration page has no login. While it is on, anyone on the same network can reach it. It turns off
-  5 minutes after the last request once the device is configured.
+* Anyone who can see the device's screen can log in to the configuration page while it is on. It turns off 5 minutes
+  after the last successful request once the device is configured.
+* Until `ca.pem` is trusted on your phone or computer, the browser can't tell the real device from someone imitating
+  it on the network, who could then catch the login password. Trust `ca.pem`, see
+  [Generate certificates](#generate-certificates).
 * WiFi credentials and API keys are stored in plain text in the device's flash.
 * The device accepts WPA2 even if your network uses WPA3. Someone imitating your network could then capture a WPA2
   handshake and try to guess your WiFi password offline, so use a strong WiFi password.

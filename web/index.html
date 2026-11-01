@@ -9,7 +9,19 @@
 <body>
     <main>
         <h1>Good to go</h1>
-        <section id="wifi-step">
+        <section id="login-step" hidden>
+            <p>Enter the password shown on the device's screen.</p>
+            <form id="login-form">
+                <label>
+                    Password
+                    <input name="password" required maxlength="10" autocomplete="off" autocapitalize="characters"
+                           spellcheck="false">
+                </label>
+                <button type="submit">Log in</button>
+                <p id="login-status" role="status"></p>
+            </form>
+        </section>
+        <section id="wifi-step" hidden>
             <form id="wifi-form">
                 <button type="button" id="scan">Scan for networks</button>
                 <ul id="networks"></ul>

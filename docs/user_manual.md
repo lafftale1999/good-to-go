@@ -43,8 +43,15 @@ You need:
 
    The digits are random and change each time the device's network starts.
 
-2. **Join that network** with your phone or computer, using the password on the screen. The screen changes to
-   `Surf to webpage:` / `goodtogo.local`.
+2. **Join that network** with your phone or computer, using the password on the screen. The screen changes to the
+   address of the setup page and the password to log in to it:
+
+   ```
+   goodtogo.local
+   PASS: K7MPX2RQ9D
+   ```
+
+   This is a different password from the network's. It is made anew every time the setup page is turned on.
 
 3. **Open `https://goodtogo.local`** in your browser.
 
@@ -53,18 +60,23 @@ You need:
    browsers). To get rid of the warning, install the device's certificate, see
    [Generate certificates](https://github.com/lafftale1999/good-to-go#generate-certificates) in the README.
 
-4. **Connect to your WiFi.**
+4. **Log in.** Type the password from the screen and press **Log in**. Small letters work too. The screen changes to
+   `Configuring...`.
+
+   You stay logged in while you use the page. After 5 minutes without using it, you are asked to log in again.
+
+5. **Connect to your WiFi.**
    1. Press **Scan for networks** and choose your home network, or type its name.
    1. Enter the password and press **Connect**.
 
    Once the device is connected, the page moves on to the API keys. When you later leave the device's network, it
    shuts down, and the page is reachable at `https://goodtogo.local` on your home network instead.
 
-5. **Add the API keys.** Enter the Trafiklab key and the Google key and press **Verify** for each. The device checks
+6. **Add the API keys.** Enter the Trafiklab key and the Google key and press **Verify** for each. The device checks
    each key with its service, and the page shows a check mark and *Key verified* when it works. Keys built into the
    device are verified by themselves and shown as verified.
 
-6. **Add your departures.** You can track up to 8.
+7. **Add your departures.** You can track up to 8.
    1. Type the name of your stop, e.g. *Sveavägen*, and press **Search**. The 10 best matches are listed with their
       town, so stops with the same name can be told apart.
    1. Choose your stop and press **Search for available departures**. This looks through a whole day of departures
@@ -74,7 +86,7 @@ You need:
    1. Repeat for every departure you want. Your saved departures are listed at the top of the page, and the cross
       next to one removes it.
 
-7. **Press Done.** The page says *Your device is good to go!* when everything is set up, or what is still missing.
+8. **Press Done.** The page says *Your device is good to go!* when everything is set up, or what is still missing.
 
 The screen then shows `U R Good To Go!` / `Press to search.` The setup page stays on, and the screen shows
 `Stop config mode` / `Hold 5 sec...` until you hold the button for 5 seconds, or until the page has been unused for
@@ -116,11 +128,11 @@ The screen has no å, ä or ö, so they are shown as a, a and o.
 # Changing the setup
 
 1. Hold the button for 5 seconds and let go.
-2. If the device is connected to your WiFi, the screen shows `Surf to webpage:` / `goodtogo.local`. Open
-   `https://goodtogo.local` from a phone or computer on the same network.
+2. If the device is connected to your WiFi, the screen shows `goodtogo.local` and the login password. Open
+   `https://goodtogo.local` from a phone or computer on the same network and log in with that password.
 
-   If it isn't connected, the screen shows the device's own network and password instead. Join it and open the
-   page as in [First-time setup](#first-time-setup).
+   If it isn't connected, the screen shows the device's own network and password instead. Join it, and the screen
+   shows the login password. Then open the page as in [First-time setup](#first-time-setup).
 3. Make your changes. Added and removed departures take effect right away, starting from the first departure.
 4. Hold the button for 5 seconds again to turn the page off, or leave it: it turns off by itself after 5 minutes
    without use.
@@ -141,7 +153,8 @@ The departure messages on the bottom row keep the departure's name on the top ro
 |------------------------|------------------------|----------------------------------------------------|
 | `Configuring...`   | `Soon good to go!` | Starting up. |
 | `WIFI: GTG...`     | `PASS: ...`        | The setup page is on and the device has its own network. Join it to set it up. |
-| `Surf to webpage:` | `goodtogo.local`   | Open `https://goodtogo.local`. |
+| `goodtogo.local`   | `PASS: ...`        | Open `https://goodtogo.local` and log in with this password, which is new each time the setup page is turned on. |
+| `Configuring...`   |                    | Someone logged in to the setup page. |
 | `Fetching...`      |                    | Fetching all departures after starting. |
 | `U R Good To Go!`  | `Press to search.` | Ready. Click to see a departure. |
 |                    | `Updating...`      | Fetching new times for the shown departure. |
@@ -174,6 +187,19 @@ If not, the setup page starts with the device's own network. When your WiFi is b
 
 The device has WiFi but can't get departures. Your internet may be down, or Trafiklab may be unavailable. Check the
 API keys on the setup page, and wait a few minutes before trying again. A fetch that works resets the count.
+
+## The page keeps asking me to log in
+
+* You are logged out after 5 minutes without using the page, and when the setup page is turned off. Log in again
+  with the password on the screen.
+* If the screen no longer shows the password, e.g. after a click showed a departure, hold the button for 5 seconds
+  twice: once to turn the setup page off and once to turn it on. The screen then shows a new password.
+* The browser must allow cookies for `goodtogo.local`, as that is how it stays logged in.
+
+## Wrong password
+
+Check the password on the screen again: it has no I, O, 0 or 1, so a character that looks like one of them is
+another one. After 5 wrong passwords in a row, the page asks you to wait 30 seconds before trying again.
 
 ## goodtogo.local doesn't open
 
@@ -211,8 +237,13 @@ device stay, and are used again after the reset.
 
 # Privacy and security
 
-* **The setup page has no password.** While it is on, anyone on the same network can open it and change the
-  settings. It turns off 5 minutes after it was last used, or when you hold the button for 5 seconds.
+* **The setup page needs the password on the device's screen**, so only someone who can see the device can log in.
+  The password changes every time the setup page is turned on. The page turns off 5 minutes after it was last used,
+  or when you hold the button for 5 seconds.
+* **Install the device's certificate** if you can, see
+  [Generate certificates](https://github.com/lafftale1999/good-to-go#generate-certificates) in the README. Without it
+  your browser can't tell the device from someone imitating it on your network, who could then catch the login
+  password.
 * **The WiFi password and API keys are stored unencrypted** on the device. Do a [factory reset](#factory-reset)
   before you give the device away.
 * The device only contacts Trafiklab and Google for departures and stop towns, and time servers for the clock. Both

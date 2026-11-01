@@ -2,6 +2,7 @@
 #define GTG_HTTPS_SERVER_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -14,6 +15,16 @@
  *
  * Static files are served from the "www" LittleFS partition, built from the
  * web/ directory. "/" serves index.html.
+ *
+ * Login. Every start makes a new random password, see gtg_https_server_get_password(), which the
+ * device shows on its LCD. Every API endpoint but the login answers 401 Unauthorized without a valid
+ * session, the static files are open, as the page shows the login itself:
+ *  - POST /api/login {"password": "..."} sets the session cookie, an HttpOnly cookie the browser
+ *    sends with every request. A session ends 5 minutes after its last successful request, one
+ *    answered with a 2xx status, and when the server stops. Answers 401 for a wrong password, and
+ *    429 for a while after 5 wrong in a row
+ *  - Only successful requests with a valid session, and logins, count as activity, see
+ *    gtg_https_server_last_activity_us()
  *
  * Device state, see gtg_dev_flag_t in gtg_dev_config.h. The page starts at the first step that isn't done:
  *  - GET  /api/status returns {"connected": bool, "time_synced": bool, "keys_verified": bool,
@@ -74,10 +85,27 @@ void gtg_https_server_deinit(void);
 bool gtg_https_server_is_running(void);
 
 /**
- * \brief esp_timer_get_time() of the last request, or of the start while there has been none
+ * \brief esp_timer_get_time() of the last successful logged in request or login, or of the start
+ *        while there has been none
  *
- * Every request counts, also the page's own polling, so an open page keeps the server in use.
+ * The page's own polling counts too, so an open page keeps the server in use. Requests without a
+ * valid session, or answered with an error, don't, so they can't keep the device awake.
  */
 int64_t gtg_https_server_last_activity_us(void);
+
+/* letters and digits that can't be mistaken for each other, and "PASS: " with it fills an LCD row */
+#define GTG_HTTPS_PASSWORD_LEN  10
+
+/**
+ * \brief Copies the login password of the running server, made anew at every start
+ *
+ * \param *out      receives the password, NUL terminated
+ * \param out_size  at least GTG_HTTPS_PASSWORD_LEN + 1
+ *
+ * \return ESP_OK                copied
+ * \return ESP_ERR_INVALID_ARG   out is NULL or too small
+ * \return ESP_ERR_INVALID_STATE the server isn't running
+ */
+esp_err_t gtg_https_server_get_password(char *out, size_t out_size);
 
 #endif

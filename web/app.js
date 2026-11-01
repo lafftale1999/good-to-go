@@ -19,6 +19,61 @@ const savedList = document.getElementById("saved-list");
 const savedStatus = document.getElementById("saved-status");
 const doneButton = document.getElementById("done");
 const doneStatus = document.getElementById("done-status");
+const loginStep = document.getElementById("login-step");
+const loginForm = document.getElementById("login-form");
+const loginStatus = document.getElementById("login-status");
+
+/* Every API request but the login goes through here. The device answers 401 when the session
+ * cookie is missing or has timed out, 5 minutes after the last request. The login form is then
+ * shown, and the caller's promise never settles, so it shows no error of its own */
+async function api(url, options) {
+    const response = await fetch(url, options);
+    if (response.status === 401) {
+        showLogin();
+        return new Promise(() => {});
+    }
+    return response;
+}
+
+function showLogin() {
+    if (keysPoll !== null) {
+        clearInterval(keysPoll);
+        keysPoll = null;
+    }
+
+    for (const step of [wifiStep, keysStep, stopsStep]) {
+        step.hidden = true;
+    }
+    statusText.textContent = "";
+    loginStep.hidden = false;
+    loginForm.elements.password.focus();
+}
+
+/* The device sets the session cookie, which the browser then sends with every request. The page
+ * is loaded again, so it starts at the right step with nothing left over from before */
+loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    setBusy(loginForm, true);
+    loginStatus.textContent = "Logging in...";
+
+    try {
+        const response = await fetch("/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: loginForm.elements.password.value.trim() }),
+        });
+
+        if (response.ok) {
+            location.reload();
+            return;
+        }
+        loginStatus.textContent = await response.text();
+    } catch {
+        loginStatus.textContent = "Could not reach the device, try again.";
+    }
+    setBusy(loginForm, false);
+});
 
 /* Collapses an .options list to the picked item when one is picked. The other items are only
  * hidden, so the button below the list shows them again without asking the device */
@@ -88,7 +143,7 @@ function setBusy(form, busy) {
 async function pollStatus() {
     let status;
     try {
-        const response = await fetch("/api/wifi/status", { cache: "no-store" });
+        const response = await api("/api/wifi/status", { cache: "no-store" });
         status = await response.json();
     } catch {
         setTimeout(pollStatus, POLL_INTERVAL_MS);
@@ -152,7 +207,7 @@ scanButton.addEventListener("click", async () => {
     statusText.textContent = "Scanning...";
 
     try {
-        const response = await fetch("/api/wifi/scan", { cache: "no-store" });
+        const response = await api("/api/wifi/scan", { cache: "no-store" });
         if (!response.ok) {
             statusText.textContent = await response.text();
             return;
@@ -176,7 +231,7 @@ wifiForm.addEventListener("submit", async (event) => {
     statusText.textContent = "Connecting...";
 
     try {
-        const response = await fetch("/api/wifi/connect", {
+        const response = await api("/api/wifi/connect", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ssid: data.get("ssid"), pass: data.get("pass") }),
@@ -214,7 +269,7 @@ let keysPoll = null;
 
 async function refreshKeys() {
     try {
-        const response = await fetch("/api/keys/status", { cache: "no-store" });
+        const response = await api("/api/keys/status", { cache: "no-store" });
         showKeysVerified(await response.json());
     } catch {
         /* nothing verified is shown, the keys can still be added */
@@ -243,7 +298,7 @@ for (const keyForm of keyForms) {
         keyStatus.textContent = "Verifying...";
 
         try {
-            const response = await fetch(`/api/keys/${keyForm.dataset.service}`, {
+            const response = await api(`/api/keys/${keyForm.dataset.service}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ key: keyForm.elements.key.value.trim() }),
@@ -338,7 +393,7 @@ async function removeSaved(button, stop, departure) {
     savedStatus.textContent = "";
 
     try {
-        const response = await fetch("/api/targets", {
+        const response = await api("/api/targets", {
             method: "DELETE",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stop_id: stop.id, departure }),
@@ -366,7 +421,7 @@ async function removeSaved(button, stop, departure) {
 
 async function loadSaved() {
     try {
-        const response = await fetch("/api/targets", { cache: "no-store" });
+        const response = await api("/api/targets", { cache: "no-store" });
         if (response.ok) {
             showSaved(await response.json());
             return;
@@ -470,7 +525,7 @@ addButton.addEventListener("click", async () => {
     addStatus.textContent = "Adding...";
 
     try {
-        const response = await fetch("/api/targets", {
+        const response = await api("/api/targets", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stop: departuresStop, departure }),
@@ -510,7 +565,7 @@ departuresButton.addEventListener("click", async () => {
     departureStatus.textContent = "Searching the day's departures, this can take up to a minute...";
 
     try {
-        const response = await fetch("/api/departures/available", {
+        const response = await api("/api/departures/available", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stop_id: stop.value }),
@@ -553,7 +608,7 @@ stopForm.addEventListener("submit", async (event) => {
     stopStatus.textContent = "Searching...";
 
     try {
-        const response = await fetch("/api/stops/search", {
+        const response = await api("/api/stops/search", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ query }),
@@ -581,7 +636,7 @@ doneButton.addEventListener("click", async () => {
     doneStatus.textContent = "";
 
     try {
-        const response = await fetch("/api/config/apply", { method: "POST" });
+        const response = await api("/api/config/apply", { method: "POST" });
         const status = await response.json();
 
         if (status.valid_config) {
@@ -611,15 +666,18 @@ doneButton.addEventListener("click", async () => {
  * verified, then the departures. Covers both a reload and a device configured from NVS at boot */
 (async () => {
     try {
-        const response = await fetch("/api/status", { cache: "no-store" });
+        const response = await api("/api/status", { cache: "no-store" });
         const status = await response.json();
 
         if (status.connected && status.keys_verified) {
             showStopsStep();
         } else if (status.connected) {
             showKeysStep();
+        } else {
+            wifiStep.hidden = false;
         }
     } catch {
-        /* stay on the WiFi step */
+        /* start at the WiFi step */
+        wifiStep.hidden = false;
     }
 })();
