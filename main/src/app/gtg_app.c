@@ -58,6 +58,29 @@
 
 #define GTG_CONFIG_URL          "goodtogo.local"
 
+/* Optional factory keys, e.g. from cred/credentials.h. Each one is tried when no key is stored
+ * for its service, see verify_stored_keys() */
+#if __has_include("credentials.h")
+#include "credentials.h"
+#endif
+
+#ifdef FACTORY_TRAFIKLAB_API_KEY
+#define FACTORY_TRAFIKLAB_KEY   FACTORY_TRAFIKLAB_API_KEY
+#else
+#define FACTORY_TRAFIKLAB_KEY   NULL
+#endif
+
+#ifdef FACTORY_GOOGLE_API_KEY
+#define FACTORY_GOOGLE_KEY      FACTORY_GOOGLE_API_KEY
+#else
+#define FACTORY_GOOGLE_KEY      NULL
+#endif
+
+static const char *const FACTORY_KEYS[GTG_API_KEY_COUNT] = {
+    [GTG_API_KEY_TRAFIKLAB] = FACTORY_TRAFIKLAB_KEY,
+    [GTG_API_KEY_GOOGLE]    = FACTORY_GOOGLE_KEY,
+};
+
 #define START_MSG_TOP           "U R Good To Go!"
 #define START_MSG_BOTTOM        "Press to search."
 
@@ -224,7 +247,8 @@ static bool connect_stored_wifi(void)
 }
 
 /* Verifies each stored key that isn't verified yet, e.g. by the user meanwhile. A key that
- * fails stays stored, the user is asked for it on the key step */
+ * fails stays stored, the user is asked for it on the key step. When no key is stored for a
+ * service its factory key is tried instead, and stored if it works */
 static void verify_stored_keys(void)
 {
     for (gtg_api_key_t which = 0; which < GTG_API_KEY_COUNT; which++) {
@@ -233,9 +257,13 @@ static void verify_stored_keys(void)
         }
 
         char key[GTG_API_KEY_MAX_LEN + 1];
-        if (gtg_dev_config_get_api_key(which, key, sizeof(key)) == ESP_OK) {
+        esp_err_t err = gtg_dev_config_get_api_key(which, key, sizeof(key));
+        if (err == ESP_OK) {
             /* logs the result itself */
             gtg_api_keys_set(which, key);
+        } else if (err == ESP_ERR_NOT_FOUND && FACTORY_KEYS[which] != NULL) {
+            ESP_LOGI(TAG, "no key stored for service %d, trying the factory key", which);
+            gtg_api_keys_set(which, FACTORY_KEYS[which]);
         }
         memset(key, 0, sizeof(key));
     }
