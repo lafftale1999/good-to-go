@@ -33,6 +33,37 @@ static bool is_fresh(const gtg_departure_node_t *node, time_t now)
     return node->ts != 0 && node->status == ESP_OK && difftime(now, node->ts) < GTG_CACHE_MAX_AGE_S;
 }
 
+bool gtg_cache_is_fresh(const gtg_departure_cache_t *cache, size_t index)
+{
+    return index < cache->len && is_fresh(&cache->nodes[index], time(NULL));
+}
+
+size_t gtg_cache_remaining(const gtg_departure_cache_t *cache, size_t index,
+                           int32_t remaining[GTG_DEPARTURES_UPCOMING_MAX])
+{
+    if (index >= cache->len) {
+        return 0;
+    }
+
+    const gtg_departure_node_t *node = &cache->nodes[index];
+    if (node->status != ESP_OK || node->ts == 0) {
+        return 0;
+    }
+
+    int32_t age = (int32_t)difftime(time(NULL), node->ts);
+
+    size_t count = 0;
+    for (size_t i = 0; i < node->count; i++) {
+        int32_t seconds = (int32_t)node->estimates[i] - age;
+        /* left since the fetch */
+        if (seconds >= 0) {
+            remaining[count++] = seconds;
+        }
+    }
+
+    return count;
+}
+
 /* Fetches the stop of the target at index for every target on the same stop */
 static esp_err_t fetch_stop(gtg_departure_cache_t *cache, size_t index)
 {
@@ -113,22 +144,21 @@ void gtg_cache_log(const gtg_departure_cache_t *cache, size_t index)
         return;
     }
 
-    if (node->count == 0) {
+    /* counted from now, the node can be up to GTG_CACHE_MAX_AGE_S old */
+    int32_t remaining[GTG_DEPARTURES_UPCOMING_MAX];
+    size_t count = gtg_cache_remaining(cache, index, remaining);
+    long age = (long)difftime(time(NULL), node->ts);
+
+    if (count == 0) {
         ESP_LOGI(TAG, "[%u/%u] %s: no departures within %d min", (unsigned)index + 1,
                  (unsigned)cache->len, where, GTG_DEPARTURES_UPCOMING_WINDOW_S / 60);
         return;
     }
 
-    /* counted from now, the node can be up to GTG_CACHE_MAX_AGE_S old */
-    long age = (long)difftime(time(NULL), node->ts);
-
     char times[GTG_DEPARTURES_UPCOMING_MAX * sizeof("60 min, ")] = "";
     size_t used = 0;
-    for (size_t i = 0; i < node->count && used < sizeof(times); i++) {
-        long seconds = (long)node->estimates[i] - age;
-        if (seconds < 0) {
-            seconds = 0;
-        }
+    for (size_t i = 0; i < count && used < sizeof(times); i++) {
+        long seconds = remaining[i];
 
         const char *sep = i > 0 ? ", " : "";
         int n = seconds < 60
