@@ -18,6 +18,8 @@ It has saved me a lot of trouble and freezing, and I hope it can help you too!
 * The times count down by themselves and are fetched again in the background every minute while shown.
 * Everything is set up from your phone or computer at `https://goodtogo.local`: WiFi, API keys and departures. The
   page is protected by a password that the device shows on its screen, so only someone at the device can log in.
+* A new device is set up step by step. Once set up, the page shows the device's health and lets you change the WiFi,
+  the API keys or the departures on their own.
 * One button controls it:
 
   | Push                   | Action                                                         |
@@ -209,15 +211,38 @@ device's log, quit it with `Ctrl+]`.
 2. The LCD now shows `goodtogo.local` and the login password, e.g. `PASS: K7MPX2RQ9D`. Open
    **`https://goodtogo.local`** and log in with that password. The LCD then shows `Configuring...`.
 3. Follow the steps on the page:
-   1. **WiFi:** choose your home network and enter its password. The device's own network shuts down once you leave
-      it, and the page is then reachable at `https://goodtogo.local` on your home network.
+   1. **WiFi:** choose your home network and enter its password. The device's own network shuts down about 5 seconds
+      after you leave it, and the page is then reachable at `https://goodtogo.local` on your home network.
    2. **API keys:** enter and verify both keys, unless the device already has them.
    3. **Departures:** search for your stop, choose the departures you want (up to 8) and add them.
-   4. **Done.**
+   4. **Done.** The page switches to the settings view.
 4. The device shows `U R Good To Go!`. Click the button to see the first departure.
 
 To change the setup later, hold the button for 5 seconds, open `https://goodtogo.local` again and log in with the
 password on the LCD.
+
+### The configuration page
+
+The page has two views, chosen by the device's `valid_config` flag when the page loads:
+
+* **Setup** (not configured, e.g. on a fresh boot or after a factory reset): the steps above, in order. The page
+  starts at the first one that isn't done, so the setup has to be finished before anything else.
+* **Settings** (configured): three collapsible sections, **WiFi**, **API keys** and **Departures**, each changed on
+  its own. Opening a section asks the device for its current state, e.g. the network it is connected to.
+
+Both views show a **Device health** panel with the flags from `/api/status`: WiFi connected, clock synced, API keys
+verified, departures saved and good to go, each with a check mark or a cross. Each settings section shows the mark of
+its own flag. The marks are refreshed after every change and when the page is shown again. They aren't polled, as
+every request counts as activity and would keep the device awake.
+
+Changing the WiFi from the settings:
+
+* The device leaves its network to join the new one. `/api/wifi/status` returns the joined network's `ssid`, which
+  the page shows once connected.
+* If the device can't join the new network, it starts its own network and shows its name and password on the LCD,
+  so it stays reachable. The old network is kept in its settings until a new one works, so a restart reconnects to it.
+* The device's own network stays on while its client is away for less than 5 seconds. Joining a network moves the
+  device's own network to that network's channel, which drops the client for a moment.
 
 ### How the login works
 
@@ -251,6 +276,10 @@ password on the LCD.
   reconnect by itself after that, even if the network comes back: reconnect it from the configuration page, or press
   the button to wake it from sleep, which restarts it.
 * After 3 failed fetches in a row the configuration mode starts.
+* When the WiFi is changed to a network your phone or computer isn't on, the page loses the device. Join that network
+  and open `https://goodtogo.local` again.
+* The device doesn't go back to its old network by itself when joining a new one fails. It starts its own network
+  instead, where you can try again, and a restart reconnects to the old network.
 * A configuration page left open and logged in on the API keys step keeps the configuration mode running, as the page
   checks the device every 3 seconds.
 * The login password is only on the LCD until something else is shown there, e.g. `Configuring...` once someone

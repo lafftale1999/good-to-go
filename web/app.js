@@ -22,6 +22,16 @@ const doneStatus = document.getElementById("done-status");
 const loginStep = document.getElementById("login-step");
 const loginForm = document.getElementById("login-form");
 const loginStatus = document.getElementById("login-status");
+const healthPanel = document.getElementById("health");
+const settings = document.getElementById("settings");
+const wifiSettings = document.getElementById("wifi-settings");
+const keysSettings = document.getElementById("keys-settings");
+const departuresSettings = document.getElementById("departures-settings");
+const wifiCurrent = document.getElementById("wifi-current");
+
+/* false while the device is set up step by step, true once it is configured and each part can be
+ * changed on its own, see showSettings() */
+let settingsMode = false;
 
 /* Every API request but the login goes through here. The device answers 401 when the session
  * cookie is missing or has timed out, 5 minutes after the last request. The login form is then
@@ -41,7 +51,7 @@ function showLogin() {
         keysPoll = null;
     }
 
-    for (const step of [wifiStep, keysStep, stopsStep]) {
+    for (const step of [wifiStep, keysStep, stopsStep, healthPanel, settings]) {
         step.hidden = true;
     }
     statusText.textContent = "";
@@ -114,6 +124,96 @@ const MODE_NAMES = { BUS: "Bus", METRO: "Metro", TRAIN: "Train", TRAM: "Tram", T
 
 const POLL_INTERVAL_MS = 1000;
 
+/* Marks an element's .mark as done or missing */
+function setMark(element, ok) {
+    const mark = element.querySelector(".mark");
+    mark.classList.toggle("ok", ok);
+    mark.classList.toggle("bad", !ok);
+    mark.setAttribute("role", "img");
+    mark.setAttribute("aria-label", ok ? "done" : "missing");
+}
+
+/* Shows the device's flags from /api/status as health checks, on the panel and on each settings
+ * section, and returns them. Asked for after each change and when the page is shown again, not
+ * polled, as every request keeps the device awake */
+async function refreshHealth() {
+    const response = await api("/api/status", { cache: "no-store" });
+    const status = await response.json();
+
+    for (const element of document.querySelectorAll("[data-flag]")) {
+        setMark(element.matches("details") ? element.querySelector("summary") : element,
+                Boolean(status[element.dataset.flag]));
+    }
+    healthPanel.hidden = false;
+    return status;
+}
+
+/* refreshes quietly, a failed request leaves the old marks */
+function updateHealth() {
+    refreshHealth().catch(() => {});
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && loginStep.hidden) {
+        updateHealth();
+    }
+});
+
+async function showCurrentWifi() {
+    try {
+        const response = await api("/api/wifi/status", { cache: "no-store" });
+        const wifi = await response.json();
+        wifiCurrent.textContent = wifi.state === "connected"
+            ? `Connected to ${wifi.ssid}. Choose another network to change it.`
+            : "Not connected. Choose a network to connect to.";
+    } catch {
+        wifiCurrent.textContent = "";
+    }
+}
+
+/* Once the device is configured, each step is moved into its own collapsible section, where it
+ * can be changed without the others. The steps keep their handlers, which check settingsMode */
+function showSettings() {
+    if (settingsMode) {
+        return;
+    }
+    settingsMode = true;
+
+    if (keysPoll !== null) {
+        clearInterval(keysPoll);
+        keysPoll = null;
+    }
+    for (const element of document.querySelectorAll(".wizard-only")) {
+        element.hidden = true;
+    }
+
+    wifiSettings.append(wifiStep);
+    keysSettings.append(keysStep);
+    departuresSettings.append(stopsStep);
+    settings.append(doneButton, doneStatus);
+
+    for (const step of [wifiStep, keysStep, stopsStep, settings]) {
+        step.hidden = false;
+    }
+}
+
+/* each section asks the device for its current state when opened */
+wifiSettings.addEventListener("toggle", () => {
+    if (wifiSettings.open) {
+        showCurrentWifi();
+    }
+});
+keysSettings.addEventListener("toggle", () => {
+    if (keysSettings.open) {
+        refreshKeys();
+    }
+});
+departuresSettings.addEventListener("toggle", () => {
+    if (departuresSettings.open) {
+        loadSaved();
+    }
+});
+
 /* wifi_err_reason_t values from esp_wifi_types.h */
 const WRONG_PASSWORD_REASONS = [15, 202, 204];
 const NOT_FOUND_REASONS = [201];
@@ -150,11 +250,18 @@ async function pollStatus() {
         return;
     }
 
-    if (status.state === "connected") {
+    if (status.state === "connected" && settingsMode) {
+        statusText.textContent = `Connected to ${status.ssid}.`;
+        wifiForm.reset();
+        setBusy(wifiForm, false);
+        showCurrentWifi();
+        updateHealth();
+    } else if (status.state === "connected") {
         showKeysStep();
     } else if (status.state === "failed") {
         statusText.textContent = failureMessage(status.reason);
         setBusy(wifiForm, false);
+        updateHealth();
     } else {
         setTimeout(pollStatus, POLL_INTERVAL_MS);
     }
@@ -228,7 +335,9 @@ wifiForm.addEventListener("submit", async (event) => {
 
     const data = new FormData(wifiForm);
     setBusy(wifiForm, true);
-    statusText.textContent = "Connecting...";
+    statusText.textContent = settingsMode
+        ? "Connecting... If your phone or computer isn't on this network, join it and open goodtogo.local again."
+        : "Connecting...";
 
     try {
         const response = await api("/api/wifi/connect", {
@@ -257,7 +366,9 @@ function showKeysVerified(keys) {
         }
     }
 
-    if (Object.values(keys).every(Boolean)) {
+    if (settingsMode) {
+        updateHealth();
+    } else if (Object.values(keys).every(Boolean)) {
         showStopsStep();
     }
 }
@@ -280,6 +391,7 @@ function showKeysStep() {
     wifiStep.hidden = true;
     keysStep.hidden = false;
     statusText.textContent = "";
+    updateHealth();
 
     refreshKeys();
     if (keysPoll === null) {
@@ -332,6 +444,7 @@ function showStopsStep() {
     keysStep.hidden = true;
     stopsStep.hidden = false;
     statusText.textContent = "";
+    updateHealth();
     stopForm.elements.query.focus();
     loadSaved();
 }
@@ -412,6 +525,7 @@ async function removeSaved(button, stop, departure) {
 
         /* the saved departures after removing, like GET /api/targets */
         showSaved(await response.json());
+        updateHealth();
         unmarkTracked(stop, departure);
     } catch {
         savedStatus.textContent = "Could not reach the device, try again.";
@@ -539,6 +653,7 @@ addButton.addEventListener("click", async () => {
         /* the saved departures after adding, like GET /api/targets */
         const saved = await response.json();
         showSaved(saved);
+        updateHealth();
 
         const mode = MODE_NAMES[departure.mode] ?? departure.mode;
         addStatus.textContent = `Added ${mode} ${departureText(departure)} from ${departuresStop.name} `
@@ -639,8 +754,12 @@ doneButton.addEventListener("click", async () => {
         const response = await api("/api/config/apply", { method: "POST" });
         const status = await response.json();
 
+        updateHealth();
+
         if (status.valid_config) {
             doneStatus.textContent = "Your device is good to go! You can close this page.";
+            /* the setup is done, from here each part can be changed on its own */
+            showSettings();
             return;
         }
 
@@ -664,12 +783,15 @@ doneButton.addEventListener("click", async () => {
 
 /* The device's flags decide the first step: WiFi when not connected, then the keys until they are
  * verified, then the departures. Covers both a reload and a device configured from NVS at boot */
+/* A configured device opens the settings, where each part can be changed. Otherwise the setup is
+ * done step by step, from the first that isn't done, as on a fresh boot */
 (async () => {
     try {
-        const response = await api("/api/status", { cache: "no-store" });
-        const status = await response.json();
+        const status = await refreshHealth();
 
-        if (status.connected && status.keys_verified) {
+        if (status.valid_config) {
+            showSettings();
+        } else if (status.connected && status.keys_verified) {
             showStopsStep();
         } else if (status.connected) {
             showKeysStep();

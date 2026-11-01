@@ -42,12 +42,18 @@ static volatile wifi_station_state_t s_state = WIFI_STATION_IDLE;
 static volatile uint8_t s_last_reason = 0;
 static int s_retry_num = 0;
 
-static void post_wifi_event(gtg_event_type_t type, bool connected, uint8_t reason, uint8_t retry)
+/* Set by wifi_station_connect() when it disconnects from the network it is connected to. That
+ * disconnect arrives after the new attempt has started, and must not count as a failed retry */
+static volatile bool s_own_disconnect = false;
+
+static void post_wifi_event(gtg_event_type_t type, bool connected, bool requested, uint8_t reason,
+                            uint8_t retry)
 {
     gtg_event_t event = {
         .type = type,
         .wifi = {
             .connected = connected,
+            .requested = requested,
             .reason = reason,
             .retry = retry,
             .max_retries = WIFI_STA_MAXIMUM_RETRY,
@@ -56,9 +62,9 @@ static void post_wifi_event(gtg_event_type_t type, bool connected, uint8_t reaso
     gtg_events_post(&event);
 }
 
-static void post_connection_changed(bool connected, uint8_t reason)
+static void post_connection_changed(bool connected, bool requested, uint8_t reason)
 {
-    post_wifi_event(GTG_EV_CONNECTION_CHANGED, connected, reason, 0);
+    post_wifi_event(GTG_EV_CONNECTION_CHANGED, connected, requested, reason, 0);
 }
 
 /* Stores the credentials the driver connected with in the device configuration, so only
@@ -96,8 +102,17 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         EventBits_t bits = xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         gtg_dev_config_set_flag(GTG_DEV_FLAG_CONNECTED, false);
 
+        /* only the disconnect from a connected network can be our own */
+        bool own = (bits & WIFI_CONNECTED_BIT) && s_own_disconnect;
+        s_own_disconnect = false;
+
         if (bits & WIFI_CONNECTED_BIT) {
-            post_connection_changed(false, event->reason);
+            post_connection_changed(false, own, event->reason);
+        }
+
+        /* the attempt that replaced the connection is already underway */
+        if (own) {
+            return;
         }
 
         /* disconnects we asked for ourselves, or after giving up, are not retried */
@@ -111,13 +126,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             s_retry_num++;
             s_state = WIFI_STATION_CONNECTING;
             ESP_LOGI(TAG, "retry to connect to the AP (%d/%d)", s_retry_num, WIFI_STA_MAXIMUM_RETRY);
-            post_wifi_event(GTG_EV_CONNECTION_RETRYING, false, event->reason, (uint8_t)s_retry_num);
+            post_wifi_event(GTG_EV_CONNECTION_RETRYING, false, false, event->reason, (uint8_t)s_retry_num);
             esp_wifi_connect();
         } else {
             ESP_LOGE(TAG, "failed to connect, reason=%d", event->reason);
             s_state = WIFI_STATION_FAILED;
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
-            post_wifi_event(GTG_EV_CONNECTION_FAILED, false, event->reason, 0);
+            post_wifi_event(GTG_EV_CONNECTION_FAILED, false, false, event->reason, 0);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
@@ -136,7 +151,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
         if (!was_connected) {
-            post_connection_changed(true, 0);
+            post_connection_changed(true, false, 0);
         }
     }
 }
@@ -244,8 +259,10 @@ esp_err_t wifi_station_connect(const char *ssid, const char *pass)
 
     ESP_RETURN_ON_ERROR(validate_credentials(ssid, pass), TAG, "invalid credentials");
 
-    /* IDLE first so the disconnect from a previous network isn't retried */
+    /* IDLE first so the disconnect from a previous network isn't retried, and marked as our own,
+     * as it may only arrive once the new attempt has started */
     s_state = WIFI_STATION_IDLE;
+    s_own_disconnect = (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
     esp_wifi_disconnect();
 
     wifi_config_t wifi_config;
@@ -365,6 +382,25 @@ wifi_station_state_t wifi_station_get_state(uint8_t *reason)
     return s_state;
 }
 
+esp_err_t wifi_station_get_ssid(char *ssid, size_t ssid_size)
+{
+    if (ssid == NULL || ssid_size < WIFI_STA_SSID_MAX_LEN + 1) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_state != WIFI_STATION_CONNECTED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_ap_record_t ap;
+    ESP_RETURN_ON_ERROR(esp_wifi_sta_get_ap_info(&ap), TAG, "failed to read the connected network");
+
+    /* the ssid is not NUL terminated when it uses the full field length */
+    size_t len = strnlen((const char *)ap.ssid, WIFI_STA_SSID_MAX_LEN);
+    memcpy(ssid, ap.ssid, len);
+    ssid[len] = '\0';
+    return ESP_OK;
+}
+
 esp_err_t wifi_station_wait_connected(TickType_t ticks)
 {
     if (s_wifi_event_group == NULL) {
@@ -430,4 +466,5 @@ void wifi_station_deinit(void) {
     s_state = WIFI_STATION_IDLE;
     s_last_reason = 0;
     s_retry_num = 0;
+    s_own_disconnect = false;
 }

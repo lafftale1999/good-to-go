@@ -86,6 +86,18 @@ esp_err_t wifi_station_scan(wifi_station_scan_result_t *results, size_t max_resu
 wifi_station_state_t wifi_station_get_state(uint8_t *reason);
 
 /**
+ * \brief Copies the SSID of the network the station is connected to
+ *
+ * \param *ssid      receives the NUL terminated SSID
+ * \param ssid_size  at least 33, an SSID is up to 32 characters
+ *
+ * \return ESP_OK                copied
+ * \return ESP_ERR_INVALID_ARG   ssid is NULL or too small
+ * \return ESP_ERR_INVALID_STATE not connected
+ */
+esp_err_t wifi_station_get_ssid(char *ssid, size_t ssid_size);
+
+/**
  * \brief Blocks until the station is connected and has an IP address
  *
  * Failed attempts don't end the wait, a new wifi_station_connect() can still succeed.

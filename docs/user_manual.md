@@ -65,12 +65,17 @@ You need:
 
    You stay logged in while you use the page. After 5 minutes without using it, you are asked to log in again.
 
+   Above the steps, **Device health** shows what the device has, each with a check mark when done and a cross when
+   not, see [Device health](#device-health). The setup has to be finished in order before anything else.
+
 5. **Connect to your WiFi.**
    1. Press **Scan for networks** and choose your home network, or type its name.
    1. Enter the password and press **Connect**.
 
    Once the device is connected, the page moves on to the API keys. When you later leave the device's network, it
-   shuts down, and the page is reachable at `https://goodtogo.local` on your home network instead.
+   shuts down about 5 seconds later, and the page is reachable at `https://goodtogo.local` on your home network
+   instead. Your phone may drop off the device's network for a moment when the device joins yours: it rejoins by
+   itself.
 
 6. **Add the API keys.** Enter the Trafiklab key and the Google key and press **Verify** for each. The device checks
    each key with its service, and the page shows a check mark and *Key verified* when it works. Keys built into the
@@ -87,6 +92,7 @@ You need:
       next to one removes it.
 
 8. **Press Done.** The page says *Your device is good to go!* when everything is set up, or what is still missing.
+   Once set up, the page switches to the settings, see [Changing the setup](#changing-the-setup).
 
 The screen then shows `U R Good To Go!` / `Press to search.` The setup page stays on, and the screen shows
 `Stop config mode` / `Hold 5 sec...` until you hold the button for 5 seconds, or until the page has been unused for
@@ -139,9 +145,46 @@ The screen has no å, ä or ö, so they are shown as a, a and o.
 
    If it isn't connected, the screen shows the device's own network and password instead. Join it, and the screen
    shows the login password. Then open the page as in [First-time setup](#first-time-setup).
-3. Make your changes. Added and removed departures take effect right away, starting from the first departure.
+3. Make your changes in the settings, see below.
 4. Hold the button for 5 seconds again to turn the page off, or leave it: it turns off by itself after 5 minutes
    without use.
+
+If the device isn't fully set up, e.g. after its WiFi was lost, the page shows the setup steps instead, from the first
+one that isn't done.
+
+## The settings
+
+A set-up device shows [Device health](#device-health) and three sections. Each section has a check mark or a cross in
+its title, and opens when you tap it:
+
+* **WiFi:** shows the network the device is connected to. To change it, press **Scan for networks**, choose the
+  network, enter its password and press **Connect**.
+    * The device leaves its current network while it joins the new one.
+    * If your phone or computer isn't on the new network, the page loses the device: join the new network and open
+      `https://goodtogo.local` again.
+    * If the device can't join the new network, e.g. because of a wrong password, it opens its own network and shows
+      its name and password on the screen. Join it, open the page and try again. Restarting the device instead,
+      e.g. by waking it from sleep, takes it back to the old network.
+* **API keys:** enter a new Trafiklab or Google key and press **Verify**. A key that is rejected doesn't replace the
+  one the device has.
+* **Departures:** your saved departures, with a cross to remove one, and the stop search to add more, as in the
+  setup. Changes take effect right away, and the device starts over from the first departure.
+
+**Done** at the bottom asks the device whether everything is set up. Once it is, the screen shows
+`Stop config mode` / `Hold 5 sec...`.
+
+## Device health
+
+| Check             | Has a check mark when                                                  |
+|-------------------|------------------------------------------------------------------------|
+| WiFi connected    | The device is connected to your WiFi.                                  |
+| Clock synced      | The device has the time from the internet.                             |
+| API keys verified | Both keys have been accepted by Trafiklab and Google.                  |
+| Departures saved  | At least one departure is saved.                                       |
+| Good to go        | The device is connected, has working keys and has departures, so it can show them. |
+
+The checks are updated after each change you make, and when you come back to the page. A cross shows what to fix:
+open that section in the settings.
 
 # Sleep
 
@@ -204,6 +247,13 @@ API keys on the setup page, and wait a few minutes before trying again. A fetch 
 * If the screen no longer shows the password, e.g. because someone already logged in, hold the button for 5 seconds
   twice: once to turn the setup page off and once to turn it on. The screen then shows a new password.
 * The browser must allow cookies for `goodtogo.local`, as that is how it stays logged in.
+
+## Changing the WiFi failed
+
+The device couldn't join the network you chose and opened its own network. Its name and password are on the screen.
+Join it, open `https://goodtogo.local`, log in and try again: check the network's name and password, and that it is a
+2.4 GHz network. To go back to the old network instead, push the button to wake the device once it has gone to sleep,
+which restarts it.
 
 ## Wrong password
 

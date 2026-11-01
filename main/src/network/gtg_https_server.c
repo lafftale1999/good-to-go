@@ -230,16 +230,23 @@ static const char *station_state_name(wifi_station_state_t state)
     }
 }
 
-/* Responds with {"state": "idle|connecting|connected|failed", "reason": <wifi_err_reason_t>} */
+/* Responds with {"state": "idle|connecting|connected|failed", "reason": <wifi_err_reason_t>,
+ * "ssid": "..."}, the ssid of the connected network, empty when not connected */
 static esp_err_t send_wifi_status(httpd_req_t *req, const char *status)
 {
     uint8_t reason;
     wifi_station_state_t state = wifi_station_get_state(&reason);
 
+    char ssid[33] = "";
+    if (state == WIFI_STATION_CONNECTED) {
+        wifi_station_get_ssid(ssid, sizeof(ssid));
+    }
+
     cJSON *json = cJSON_CreateObject();
     if (json == NULL
         || cJSON_AddStringToObject(json, "state", station_state_name(state)) == NULL
-        || cJSON_AddNumberToObject(json, "reason", reason) == NULL) {
+        || cJSON_AddNumberToObject(json, "reason", reason) == NULL
+        || cJSON_AddStringToObject(json, "ssid", ssid) == NULL) {
         cJSON_Delete(json);
         return send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
