@@ -232,6 +232,12 @@ esp_err_t gtg_dev_config_remove_target(const char *stop_id, const gtg_departure_
 esp_err_t gtg_dev_config_get_targets(trafiklab_target_t *out, size_t max, size_t *count);
 
 /**
+ * \brief A number that changes each time realtime_targets changes: added, removed, loaded or
+ *        reset. Tells a copy of the targets that it is outdated
+ */
+uint32_t gtg_dev_config_get_targets_version(void);
+
+/**
  * \brief Returns whether the departure from the stop is in realtime_targets
  */
 bool gtg_dev_config_has_target(const char *stop_id, const gtg_departure_option_t *departure);

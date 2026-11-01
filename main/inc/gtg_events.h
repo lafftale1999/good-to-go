@@ -19,6 +19,7 @@ typedef enum {
     GTG_EV_CONNECTION_CHANGED,  /*!< the station connected or lost its connection, see wifi */
     GTG_EV_API_KEY_REJECTED,    /*!< a service rejected a key, at verification or in use, see api_key */
     GTG_EV_BUTTON_CLICKED,      /*!< a button was released within the short hold time, see button */
+    GTG_EV_BUTTON_DOUBLE_CLICKED, /*!< a button was clicked twice in a row, see button */
     GTG_EV_BUTTON_SHORT_HOLD,   /*!< a button was released after the short hold time, see button */
     GTG_EV_BUTTON_LONG_HOLD,    /*!< a button has been held for the long hold time, still pushed, see button */
     GTG_EV_CONFIG_APPLIED,      /*!< GTG_DEV_FLAG_VALID_CONFIG got set, the device is fully configured */
@@ -38,7 +39,7 @@ typedef struct {
 
         struct {
             uint8_t id;
-        } button;               /*!< GTG_EV_BUTTON_CLICKED, _SHORT_HOLD and _LONG_HOLD */
+        } button;               /*!< GTG_EV_BUTTON_CLICKED, _DOUBLE_CLICKED, _SHORT_HOLD and _LONG_HOLD */
     };
 } gtg_event_t;
 
@@ -86,6 +87,12 @@ esp_err_t gtg_events_post_from_isr(const gtg_event_t *event, BaseType_t *higher_
  * \return ESP_ERR_INVALID_STATE not initialized
  */
 esp_err_t gtg_events_receive(gtg_event_t *event, TickType_t ticks);
+
+/**
+ * \brief esp_timer_get_time() of the last posted event, or of gtg_events_init() while there has
+ *        been none. A dropped event counts too
+ */
+int64_t gtg_events_last_activity_us(void);
 
 /**
  * \brief Name of an event type for logging

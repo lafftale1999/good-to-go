@@ -40,6 +40,9 @@ static SemaphoreHandle_t s_mutex = NULL;
 /* mirrors s_config.flags, so gtg_dev_config_wait_flags() can block on them */
 static EventGroupHandle_t s_flag_events = NULL;
 
+/* counts every change of realtime_targets, runtime only */
+static volatile uint32_t s_targets_version = 0;
+
 static esp_err_t save_locked(void);
 
 /* The field that holds the key of each service */
@@ -103,7 +106,13 @@ static void set_flag_locked(gtg_dev_flag_t flag, bool on)
 /* Called with the lock held, after realtime_targets changed */
 static void update_departures_flag_locked(void)
 {
+    s_targets_version++;
     set_flag_locked(GTG_DEV_FLAG_HAS_DEPARTURES, s_config.realtime_targets.len > 0);
+}
+
+uint32_t gtg_dev_config_get_targets_version(void)
+{
+    return s_targets_version;
 }
 
 void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on)

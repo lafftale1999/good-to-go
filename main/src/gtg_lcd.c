@@ -115,6 +115,22 @@ esp_err_t gtg_lcd_clear(gtg_lcd_module_t *lcd)
     return err == 0 ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t gtg_lcd_set_backlight(gtg_lcd_module_t *lcd, bool on)
+{
+    if (lcd == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!lcd->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(lcd->mutex, portMAX_DELAY);
+    uint8_t err = on ? lcd_1602_backlight_on(lcd->dev) : lcd_1602_backlight_off(lcd->dev);
+    xSemaphoreGive(lcd->mutex);
+
+    return err == 0 ? ESP_OK : ESP_FAIL;
+}
+
 void gtg_lcd_deinit(gtg_lcd_module_t *lcd)
 {
     if (lcd == NULL) {

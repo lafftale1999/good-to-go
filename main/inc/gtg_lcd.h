@@ -62,6 +62,19 @@ esp_err_t gtg_lcd_print(gtg_lcd_module_t *lcd, const char *top, const char *bott
 esp_err_t gtg_lcd_clear(gtg_lcd_module_t *lcd);
 
 /**
+ * \brief Turns the backlight on or off, what the screen shows is kept
+ *
+ * It stays as set for later prints. The LCD is powered apart from the ESP32, so turn it off
+ * before deep sleep. gtg_lcd_init() turns it on again.
+ *
+ * \return ESP_OK                set
+ * \return ESP_ERR_INVALID_ARG   lcd is NULL
+ * \return ESP_ERR_INVALID_STATE not initialized
+ * \return ESP_FAIL              the LCD didn't take it
+ */
+esp_err_t gtg_lcd_set_backlight(gtg_lcd_module_t *lcd, bool on);
+
+/**
  * \brief Releases the I2C bus and the resources taken by gtg_lcd_init()
  */
 void gtg_lcd_deinit(gtg_lcd_module_t *lcd);
