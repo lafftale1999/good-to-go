@@ -21,6 +21,7 @@ typedef struct _gtg_departure_node_ {
     uint16_t  estimates[GTG_DEPARTURES_UPCOMING_MAX];  /*!< seconds from ts, soonest first */
     uint8_t   count;                                /*!< 0-GTG_DEPARTURES_UPCOMING_MAX in use */
     esp_err_t status;                               /*!< result of the last fetch */
+    time_t    attempted;                            /*!< when last fetched, also when it failed */
 } gtg_departure_node_t;
 
 /**
@@ -68,6 +69,14 @@ void gtg_cache_refresh_all(gtg_departure_cache_t *cache);
  *        gtg_cache_refresh() makes no request
  */
 bool gtg_cache_is_fresh(const gtg_departure_cache_t *cache, size_t index);
+
+/**
+ * \brief Seconds until the node at index is due for a background fetch, 0 when it is due
+ *
+ * Due GTG_CACHE_MAX_AGE_S after its last fetch, also a failed one, so a failing stop is tried
+ * once a minute instead of over and over. A node never fetched is due right away.
+ */
+int32_t gtg_cache_seconds_until_due(const gtg_departure_cache_t *cache, size_t index);
 
 /**
  * \brief The seconds from now to the coming departures of the target at index
