@@ -22,12 +22,14 @@ It has saved me a lot of trouble and freezing, and I hope it can help you too!
 
   | Push                   | Action                                                         |
   |------------------------|----------------------------------------------------------------|
-  | Click                  | Show the chosen departure, refreshed if it is 60 s or older    |
-  | Double-click           | Move to the next departure                                     |
-  | Hold 5-20 s            | Turn the configuration page on or off                          |
+  | Click                  | Show the next departure, refreshed if it is 60 s or older      |
+  | Triple-click           | Go to deep sleep                                               |
+  | Hold 5 s               | Turn the configuration page on or off, at 5 s while still held |
   | Hold 20 s              | Factory reset                                                  |
 
-* It goes to deep sleep after 5 minutes without use. One push wakes it.
+  While the configuration page is on, only the holds work: clicks and triple-clicks are ignored, so they can't hide
+  the login password. Hold 5 s to turn the page off first.
+* It goes to deep sleep after 5 minutes without use, or on a triple-click. One push wakes it.
 
 Departures come from [Trafiklab](https://www.trafiklab.se/), which covers public transport in all of Sweden.
 
@@ -251,8 +253,8 @@ password on the LCD.
 * After 3 failed fetches in a row the configuration mode starts.
 * A configuration page left open and logged in on the API keys step keeps the configuration mode running, as the page
   checks the device every 3 seconds.
-* The login password is only on the LCD until something else is shown there, e.g. a departure after a click. To see
-  a password again, turn the configuration mode off and on, which makes a new one.
+* The login password is only on the LCD until something else is shown there, e.g. `Configuring...` once someone
+  logs in. To see a password again, turn the configuration mode off and on, which makes a new one.
 
 **Security**
 

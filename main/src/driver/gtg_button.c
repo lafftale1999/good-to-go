@@ -49,57 +49,72 @@ static TickType_t ticks_until(int64_t since, int64_t ms)
     return remaining_ms > 0 ? pdMS_TO_TICKS(remaining_ms) + 1 : 0;
 }
 
+/* Posts the clicks of a sequence that ended before the triple click, one event each */
+static void post_clicks(uint8_t clicks)
+{
+    for (uint8_t i = 0; i < clicks; i++) {
+        post_button_event(GTG_EV_BUTTON_CLICKED);
+    }
+}
+
 /*
  * Each edge wakes the task, which waits out the bounce and then reads the level. Edges during
  * the wait are dropped before reading, so a bounce only counts as one change, while an edge
  * after the read wakes the task again. A push is timed from its debounced start.
  *
- * While the button is pushed the task also wakes at the long hold time, and posts the long hold
- * right then without waiting for the release. The release after a long hold posts nothing.
+ * While the button is pushed the task also wakes at the hold times, and posts the hold right then
+ * without waiting for the release: first the short hold, then, still pushed, the long hold. The
+ * release after a hold posts nothing.
  *
- * A click isn't posted on its release: the task waits GTG_BUTTON_DOUBLE_CLICK_MS for a second
- * push first. Without one the click is posted, with one the first click waits for how the second
- * push ends. Released as a click the two are one double-click, held to a short or long hold the
- * first click is dropped and only the hold is posted.
+ * Clicks are counted in a sequence, each pushed within GTG_BUTTON_MULTI_CLICK_MS of the last one's
+ * release. The third click posts the triple click on its release. A sequence that ends before
+ * that, with no push within the window, posts its one or two clicks. A push of the sequence that
+ * becomes a hold drops the clicks before it, only the hold is posted.
  */
 static void button_task(void *arg)
 {
     bool pushed = is_pushed();
-    bool long_hold_posted = false;
     int64_t pushed_at = esp_timer_get_time();
 
-    /* a click released, waiting for a second push within the double-click window */
-    bool click_pending = false;
-    int64_t released_at = 0;
+    /* the holds of the current push that have been posted, a hold posts each once */
+    bool short_hold_posted = false;
+    bool long_hold_posted = false;
 
-    /* the push follows a click within the window, so it ends in a double-click or a hold */
-    bool second_push = false;
+    /* clicks released in the current sequence, waiting for a next push within the window */
+    uint8_t clicks = 0;
+    int64_t released_at = 0;
 
     if (pushed) {
         /* e.g. the push that woke the device from deep sleep, which isn't a click. Marked as
-         * handled, so neither its release nor a long hold posts anything */
+         * handled, so neither its release nor a hold posts anything */
         ESP_LOGI(TAG, "pushed at start, ignoring this push");
+        short_hold_posted = true;
         long_hold_posted = true;
     }
 
     while (true) {
         TickType_t wait = portMAX_DELAY;
-        if (pushed && !long_hold_posted) {
+        if (pushed && !short_hold_posted) {
+            wait = ticks_until(pushed_at, GTG_BUTTON_SHORT_HOLD_MS);
+        } else if (pushed && !long_hold_posted) {
             wait = ticks_until(pushed_at, GTG_BUTTON_LONG_HOLD_MS);
-        } else if (click_pending) {
-            wait = ticks_until(released_at, GTG_BUTTON_DOUBLE_CLICK_MS);
+        } else if (!pushed && clicks > 0) {
+            wait = ticks_until(released_at, GTG_BUTTON_MULTI_CLICK_MS);
         }
 
         if (ulTaskNotifyTake(pdTRUE, wait) == 0) {
-            if (pushed && !long_hold_posted) {
-                /* pushed for the long hold time, a first click before it is dropped */
+            if (pushed && !short_hold_posted) {
+                /* pushed for the short hold time, the clicks before it are dropped */
+                short_hold_posted = true;
+                clicks = 0;
+                post_button_event(GTG_EV_BUTTON_SHORT_HOLD);
+            } else if (pushed && !long_hold_posted) {
                 long_hold_posted = true;
-                second_push = false;
                 post_button_event(GTG_EV_BUTTON_LONG_HOLD);
-            } else if (click_pending) {
-                /* no second push within the window */
-                click_pending = false;
-                post_button_event(GTG_EV_BUTTON_CLICKED);
+            } else if (!pushed && clicks > 0) {
+                /* no next push within the window, the sequence ended */
+                post_clicks(clicks);
+                clicks = 0;
             }
             continue;
         }
@@ -116,37 +131,33 @@ static void button_task(void *arg)
 
         if (pushed) {
             pushed_at = esp_timer_get_time();
+            short_hold_posted = false;
             long_hold_posted = false;
 
-            /* the window is checked here too, the press may come just after it but before
-             * the task got to post the click */
-            second_push = click_pending
-                && (pushed_at - released_at) / 1000 < GTG_BUTTON_DOUBLE_CLICK_MS;
-            if (click_pending && !second_push) {
-                post_button_event(GTG_EV_BUTTON_CLICKED);
+            /* the window is checked here too, the push may come just after it but before the
+             * task got to post the clicks */
+            if (clicks > 0 && (pushed_at - released_at) / 1000 >= GTG_BUTTON_MULTI_CLICK_MS) {
+                post_clicks(clicks);
+                clicks = 0;
             }
-            click_pending = false;
             continue;
         }
 
-        if (long_hold_posted) {
+        /* the release of a hold, which was posted while pushed */
+        if (short_hold_posted) {
             continue;
         }
 
         int64_t now = esp_timer_get_time();
-        int64_t held_ms = (now - pushed_at) / 1000;
-        ESP_LOGD(TAG, "released after %lld ms", held_ms);
+        ESP_LOGD(TAG, "released after %lld ms", (now - pushed_at) / 1000);
 
-        if (held_ms >= GTG_BUTTON_SHORT_HOLD_MS) {
-            /* a first click before it is dropped */
-            post_button_event(GTG_EV_BUTTON_SHORT_HOLD);
-        } else if (second_push) {
-            post_button_event(GTG_EV_BUTTON_DOUBLE_CLICKED);
-        } else {
-            click_pending = true;
-            released_at = now;
+        clicks++;
+        released_at = now;
+
+        if (clicks == 3) {
+            clicks = 0;
+            post_button_event(GTG_EV_BUTTON_TRIPLE_CLICKED);
         }
-        second_push = false;
     }
 }
 
