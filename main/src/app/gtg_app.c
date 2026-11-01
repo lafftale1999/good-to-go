@@ -54,6 +54,11 @@
 #define ERROR_SHOW_TIME_S       3
 #define AP_CLIENT_POLL_MS       500
 
+/* how long the AP must be without its client before the client counts as gone. When the station
+ * joins a network the AP moves to its channel, which drops the client for a moment until it
+ * rejoins, and that must not stop the AP under it */
+#define AP_CLIENT_GONE_US       (5LL * 1000 * 1000)
+
 /* lets the factory reset message be read before the restart */
 #define FACTORY_RESET_RESTART_DELAY_MS  2000
 
@@ -217,6 +222,21 @@ static void show_config_logged_in(gtg_app_handle_t app)
     gtg_lcd_print(&app->lcd, "Configuring...", "");
 }
 
+static esp_err_t config_mode_start(gtg_app_handle_t app);
+
+/* A network chosen in the configuration couldn't be joined. The page may have been reached over
+ * the old network, which the device has left, so its own network starts to stay reachable, and
+ * its name and password are shown. Nothing to do without the configuration, or with the AP on */
+static void on_config_connection_failed(gtg_app_handle_t app)
+{
+    if (!gtg_https_server_is_running() || wifi_softap_is_running()) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "could not join the chosen network, starting the device's own network");
+    config_mode_start(app);
+}
+
 /* Whether the event is one the configuration takes: anything but a click or a triple click. In
  * the configuration only the short hold, which leaves it, and the long hold, which factory
  * resets, act on the button */
@@ -286,6 +306,10 @@ static void event_task(void *arg)
         case GTG_EV_CONFIG_LOGIN:
             log_event(&event);
             show_config_logged_in(app);
+            break;
+        case GTG_EV_CONNECTION_FAILED:
+            log_event(&event);
+            on_config_connection_failed(app);
             break;
         default:
             log_event(&event);
@@ -477,10 +501,13 @@ static void config_mode_stop(gtg_app_handle_t app)
 
 /*
  * Runs from boot, whatever the device is doing, and checks every second:
- *  - the LCD switches from the AP's credentials to goodtogo.local and the login password when a
- *    client joins the AP
- *  - the AP is stopped once its last client leaves and the station is connected, the user then
- *    reaches goodtogo.local over the home network
+ *  - the LCD switches from the AP's credentials to goodtogo.local and the login password when the
+ *    first client joins the AP
+ *  - the AP is stopped once its client has left and the station is connected, the user then
+ *    reaches goodtogo.local over the home network. A client counts as gone after
+ *    AP_CLIENT_GONE_US without one, so the AP isn't stopped while a client rejoins after the AP
+ *    moved channel. An AP that never had a client is stopped as soon as the station connects.
+ *    Otherwise only leaving the configuration stops the AP
  *  - the configuration server, mDNS and the AP are stopped once the configuration is valid and
  *    the server has had no request for 5 minutes
  *  - the device goes to deep sleep after 5 minutes without any activity, see last_activity_us()
@@ -489,8 +516,10 @@ static void watch_task(void *arg)
 {
     gtg_app_handle_t app = arg;
 
-    /* whether the AP had a client at the last check */
+    /* whether the running AP has had a client, and since when it has had none, 0 while it has
+     * one. Both start over when the AP stops */
     bool ap_had_client = false;
+    int64_t ap_empty_since = 0;
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(WATCH_PERIOD_MS));
@@ -500,17 +529,31 @@ static void watch_task(void *arg)
 
         xSemaphoreTake(app->mode_lock, portMAX_DELAY);
 
-        /* the AP's credentials are shown until a client joins, then the address it surfs to
-         * and the login password */
-        bool ap_has_client = wifi_softap_is_running() && wifi_softap_has_client();
-        if (ap_has_client && !ap_had_client) {
-            show_config_login(app);
-        }
-        ap_had_client = ap_has_client;
+        bool ap_running = wifi_softap_is_running();
+        bool ap_has_client = ap_running && wifi_softap_has_client();
 
-        if (wifi_softap_is_running() && !wifi_softap_has_client() && (flags & GTG_DEV_FLAG_CONNECTED)) {
-            ESP_LOGI(TAG, "the client left the AP and the device is connected, stopping the AP");
+        if (!ap_running) {
+            ap_had_client = false;
+            ap_empty_since = 0;
+        } else if (ap_has_client) {
+            /* the AP's credentials are shown until the first client joins, then the address it
+             * surfs to and the login password. A client rejoining after a moment away doesn't
+             * show them again, the screen may show that it logged in */
+            if (!ap_had_client) {
+                show_config_login(app);
+            }
+            ap_had_client = true;
+            ap_empty_since = 0;
+        } else if (ap_empty_since == 0) {
+            ap_empty_since = now;
+        }
+
+        bool client_gone = !ap_had_client || now - ap_empty_since >= AP_CLIENT_GONE_US;
+        if (ap_running && !ap_has_client && client_gone && (flags & GTG_DEV_FLAG_CONNECTED)) {
+            ESP_LOGI(TAG, "the AP has no client and the device is connected, stopping the AP");
             wifi_softap_deinit();
+            ap_had_client = false;
+            ap_empty_since = 0;
         }
 
         if (gtg_https_server_is_running() && (flags & GTG_DEV_FLAG_VALID_CONFIG)
@@ -906,7 +949,7 @@ static void on_connection_changed(gtg_app_handle_t app, const gtg_event_t *event
 {
     if (!event->wifi.connected) {
         /* the device disconnected itself, e.g. to join another network from the configuration */
-        if (event->wifi.reason == WIFI_REASON_ASSOC_LEAVE) {
+        if (event->wifi.requested) {
             return;
         }
 
@@ -945,10 +988,12 @@ static void on_connection_retrying(gtg_app_handle_t app, const gtg_event_t *even
     gtg_lcd_print(&app->lcd, CONN_LOST_TOP, bottom);
 }
 
-/* The station gave up on the lost connection, the user reconnects it in the configuration */
+/* The station gave up: on the lost connection, which the user reconnects in the configuration,
+ * or on a network the user chose in the configuration, see on_config_connection_failed() */
 static void on_connection_failed(gtg_app_handle_t app)
 {
     if (!app->conn_lost) {
+        on_config_connection_failed(app);
         return;
     }
 

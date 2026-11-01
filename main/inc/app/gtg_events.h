@@ -36,6 +36,8 @@ typedef struct {
     union {
         struct {
             bool    connected;
+            bool    requested;  /*!< the device disconnected itself, e.g. to join another network,
+                                     GTG_EV_CONNECTION_CHANGED only */
             uint8_t reason;     /*!< wifi_err_reason_t of the last disconnect, 0 when connected */
             uint8_t retry;      /*!< the retry started, 1-max_retries, GTG_EV_CONNECTION_RETRYING only */
             uint8_t max_retries; /*!< the retries before the station gives up */

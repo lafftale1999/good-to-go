@@ -21,6 +21,31 @@
                 <p id="login-status" role="status"></p>
             </form>
         </section>
+        <section id="health" aria-labelledby="health-title" hidden>
+            <h2 id="health-title">Device health</h2>
+            <ul>
+                <li data-flag="connected"><span class="mark"></span>WiFi connected</li>
+                <li data-flag="time_synced"><span class="mark"></span>Clock synced</li>
+                <li data-flag="keys_verified"><span class="mark"></span>API keys verified</li>
+                <li data-flag="has_departures"><span class="mark"></span>Departures saved</li>
+                <li data-flag="valid_config"><span class="mark"></span>Good to go</li>
+            </ul>
+        </section>
+        <!-- Once the device is configured, the steps below are moved into these sections, see showSettings() -->
+        <section id="settings" hidden>
+            <details id="wifi-settings" data-flag="connected">
+                <summary><span class="mark"></span>WiFi</summary>
+                <p id="wifi-current"></p>
+                <p class="note">The device leaves its network while it joins the new one. If it can't join it, it
+                    opens its own network: join that with the name and password on the device's screen.</p>
+            </details>
+            <details id="keys-settings" data-flag="keys_verified">
+                <summary><span class="mark"></span>API keys</summary>
+            </details>
+            <details id="departures-settings" data-flag="has_departures">
+                <summary><span class="mark"></span>Departures</summary>
+            </details>
+        </section>
         <section id="wifi-step" hidden>
             <form id="wifi-form">
                 <button type="button" id="scan">Scan for networks</button>
@@ -35,9 +60,10 @@
                 </label>
                 <button type="submit">Connect</button>
             </form>
+            <p id="status" role="status"></p>
         </section>
         <section id="keys-step" hidden>
-            <p>Connected to WiFi. Now add your API keys.</p>
+            <p class="wizard-only">Connected to WiFi. Now add your API keys.</p>
             <form class="key-form" data-service="trafiklab">
                 <label>
                     Trafiklab API key
@@ -82,7 +108,6 @@
             <button type="button" id="done">Done</button>
             <p id="done-status" role="status"></p>
         </section>
-        <p id="status" role="status"></p>
     </main>
     <script src="/app.js"></script>
 </body>

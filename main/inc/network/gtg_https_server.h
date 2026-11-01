@@ -35,7 +35,8 @@
  *
  * WiFi configuration API, see gtg_wifi_station.h:
  *  - POST /api/wifi/connect {"ssid": "...", "pass": "..."} starts connecting the station
- *  - GET  /api/wifi/status  returns {"state": "idle|connecting|connected|failed", "reason": n}
+ *  - GET  /api/wifi/status  returns {"state": "idle|connecting|connected|failed", "reason": n,
+ *                           "ssid": "..."}, the ssid empty when not connected
  *  - GET  /api/wifi/scan    returns [{"ssid": "...", "rssi": n, "secure": bool}, ...], strongest first
  *
  * API key configuration, see gtg_api_keys.h. Keys can only be added once the station is connected:

@@ -15,8 +15,88 @@ body {
 }
 
 main {
-    padding: 0 16px;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 36rem;
+    padding: 0 16px 32px;
     text-align: center;
+}
+
+/* a health check: a check mark when the flag is set, a cross when not */
+.mark {
+    display: inline-block;
+    width: 1.5em;
+    font-weight: bold;
+}
+
+.mark.ok::before {
+    content: "\2713";
+    color: #2e9d4f;
+}
+
+.mark.bad::before {
+    content: "\2717";
+    color: #d64545;
+}
+
+#health {
+    margin-bottom: 24px;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 4px;
+    text-align: left;
+}
+
+#health h2 {
+    margin: 0 0 8px;
+    font-size: 1.1em;
+}
+
+#health ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 4px;
+}
+
+/* the configured device's settings, one collapsible section per part */
+#settings {
+    display: grid;
+    gap: 12px;
+    text-align: left;
+}
+
+#settings details {
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 4px;
+}
+
+#settings summary {
+    font-weight: bold;
+    cursor: pointer;
+}
+
+#settings details[open] summary {
+    margin-bottom: 12px;
+}
+
+#settings details > p {
+    margin: 0 0 12px;
+}
+
+#settings .note {
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+#wifi-current:empty {
+    display: none;
+}
+
+#status:empty {
+    display: none;
 }
 
 #keys-step {
