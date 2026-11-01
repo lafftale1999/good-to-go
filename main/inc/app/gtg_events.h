@@ -17,6 +17,8 @@
  */
 typedef enum {
     GTG_EV_CONNECTION_CHANGED,  /*!< the station connected or lost its connection, see wifi */
+    GTG_EV_CONNECTION_RETRYING, /*!< the station retries to connect, see wifi.retry and wifi.max_retries */
+    GTG_EV_CONNECTION_FAILED,   /*!< the station gave up after its retries, see wifi.reason */
     GTG_EV_API_KEY_REJECTED,    /*!< a service rejected a key, at verification or in use, see api_key */
     GTG_EV_BUTTON_CLICKED,      /*!< a button was released within the short hold time, see button */
     GTG_EV_BUTTON_DOUBLE_CLICKED, /*!< a button was clicked twice in a row, see button */
@@ -33,8 +35,10 @@ typedef struct {
     union {
         struct {
             bool    connected;
-            uint8_t reason;     /*!< wifi_err_reason_t of a lost connection, 0 when connected */
-        } wifi;                 /*!< GTG_EV_CONNECTION_CHANGED */
+            uint8_t reason;     /*!< wifi_err_reason_t of the last disconnect, 0 when connected */
+            uint8_t retry;      /*!< the retry started, 1-max_retries, GTG_EV_CONNECTION_RETRYING only */
+            uint8_t max_retries; /*!< the retries before the station gives up */
+        } wifi;                 /*!< GTG_EV_CONNECTION_CHANGED, _RETRYING and _FAILED */
 
         struct {
             gtg_api_key_t which;
