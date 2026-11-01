@@ -63,7 +63,11 @@
 
 /* shown after the last departure, before the double-click wraps around to the first */
 #define END_MSG_TOP             "Need more stops?"
-#define END_MSG_BOTTOM          "Hold 5 seconds..."
+#define END_MSG_BOTTOM          "Hold 5 sec..."
+
+/* shown in the configuration mode once the configuration is valid, a short hold stops it */
+#define CONFIG_HINT_TOP         "Stop config mode"
+#define CONFIG_HINT_BOTTOM      "Hold 5 sec..."
 
 /* The definition behind gtg_app_handle_t, only visible in this file */
 struct gtg_app {
@@ -74,7 +78,8 @@ struct gtg_app {
     /* the chosen departure, cache.len is the end message after the last one */
     size_t                  index;
 
-    /* while a departure is shown, it is drawn again at redraw_at for its times to count down */
+    /* while a departure is shown, it is drawn again at redraw_at for its times to count down,
+     * and fetched again in the background once it is due, see on_redraw_timer() */
     bool                    redraw;
     TickType_t              redraw_at;
     TaskHandle_t            event_task;
@@ -132,6 +137,8 @@ static void log_event(const gtg_event_t *event)
         ESP_LOGI(TAG, "event: %s, button %u", gtg_event_type_name(event->type), event->button.id);
         break;
     case GTG_EV_CONFIG_APPLIED:
+    case GTG_EV_TARGET_ADDED:
+    case GTG_EV_TARGET_REMOVED:
         ESP_LOGI(TAG, "event: %s", gtg_event_type_name(event->type));
         break;
     default:
@@ -637,8 +644,36 @@ static void redraw_departure(gtg_app_handle_t app)
 {
     TickType_t wait = draw_departure(app);
 
-    app->redraw = wait != portMAX_DELAY;
+    /* also when nothing on the screen changes, e.g. "No departures..." or "Fetch failed", the
+     * next background fetch is due a minute after the last one */
+    TickType_t until_due = pdMS_TO_TICKS(gtg_cache_seconds_until_due(&app->cache, app->index) * 1000);
+    if (until_due < wait) {
+        wait = until_due;
+    }
+
+    app->redraw = true;
     app->redraw_at = xTaskGetTickCount() + wait;
+}
+
+/* The redraw timer of the shown departure. Its information is fetched again in the background
+ * once it is due, without "Updating...", the screen keeps the old times until the new ones or
+ * the failure are drawn */
+static void on_redraw_timer(gtg_app_handle_t app)
+{
+    if (gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG) {
+        sync_cache(app);
+        if (app->index >= app->cache.len) {
+            /* reconfigured meanwhile, the next press shows the new departures */
+            stop_redraw(app);
+            return;
+        }
+
+        if (gtg_cache_seconds_until_due(&app->cache, app->index) == 0) {
+            gtg_cache_refresh(&app->cache, app->index);
+        }
+    }
+
+    redraw_departure(app);
 }
 
 /* Refreshes the chosen departure when its information is 60 s or older, shows and logs it.
@@ -684,6 +719,19 @@ static void choose_next(gtg_app_handle_t app)
     show_chosen(app);
 }
 
+/* In the configuration mode with a valid configuration, tells the user how to stop it.
+ * \return true when shown */
+static bool show_config_hint(gtg_app_handle_t app)
+{
+    if (!gtg_https_server_is_running() || !(gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG)) {
+        return false;
+    }
+
+    stop_redraw(app);
+    gtg_lcd_print(&app->lcd, CONFIG_HINT_TOP, CONFIG_HINT_BOTTOM);
+    return true;
+}
+
 static void toggle_config_mode(gtg_app_handle_t app)
 {
     stop_redraw(app);
@@ -713,7 +761,10 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
     app->index = 0;
     gtg_cache_refresh_all(&app->cache);
 
-    gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+    /* after the first setup the configuration mode is still on */
+    if (!show_config_hint(app)) {
+        gtg_lcd_print(&app->lcd, START_MSG_TOP, START_MSG_BOTTOM);
+    }
 
     gtg_event_t event;
 
@@ -730,7 +781,7 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
 
         if (gtg_events_receive(&event, wait) != ESP_OK) {
             if (app->redraw) {
-                redraw_departure(app);
+                on_redraw_timer(app);
             }
             continue;
         }
@@ -763,7 +814,10 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
                     break;
 
                 case GTG_EV_CONFIG_APPLIED:
-                    // print configuration success message and start normal mode again.
+                case GTG_EV_TARGET_ADDED:
+                case GTG_EV_TARGET_REMOVED:
+                    /* only while the configuration is valid, so only with departures left */
+                    show_config_hint(app);
                     break;
 
                 default:

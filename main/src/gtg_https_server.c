@@ -19,6 +19,7 @@
 #include "gtg_stop_search.h"
 #include "gtg_departures.h"
 #include "gtg_dev_config.h"
+#include "gtg_events.h"
 
 #define WWW_PARTITION_LABEL   "www"
 #define WWW_BASE_PATH         "/www"
@@ -233,10 +234,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 }
 
 /* The "Done" button. The configuration becomes valid by itself, so nothing changes here, it
- * answers like /api/status with 409 Conflict while something is still missing */
+ * answers like /api/status with 409 Conflict while something is still missing. A valid one is
+ * posted as applied, so the device tells the user how to stop the configuration mode */
 static esp_err_t config_apply_post_handler(httpd_req_t *req)
 {
     bool valid = gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG;
+    if (valid) {
+        gtg_event_t event = { .type = GTG_EV_CONFIG_APPLIED };
+        gtg_events_post(&event);
+    }
+
     return send_status(req, valid ? "200 OK" : "409 Conflict");
 }
 

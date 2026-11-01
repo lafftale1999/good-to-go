@@ -409,6 +409,9 @@ esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *co
         ESP_LOGI(TAG, "tracking %s %s %s from %s (%s), %u of %d",
                  target->departure.mode, target->departure.line, target->departure.destination,
                  target->stop.name, target->stop.id, (unsigned)len, GTG_DEV_CONFIG_MAX_TARGETS);
+
+        gtg_event_t event = { .type = GTG_EV_TARGET_ADDED };
+        gtg_events_post(&event);
     }
 
     return err;
@@ -454,6 +457,9 @@ esp_err_t gtg_dev_config_remove_target(const char *stop_id, const gtg_departure_
     ESP_LOGI(TAG, "stopped tracking %s %s %s from %s (%s), %u of %d",
              removed.departure.mode, removed.departure.line, removed.departure.destination,
              removed.stop.name, removed.stop.id, (unsigned)len, GTG_DEV_CONFIG_MAX_TARGETS);
+
+    gtg_event_t event = { .type = GTG_EV_TARGET_REMOVED };
+    gtg_events_post(&event);
 
     return ESP_OK;
 }

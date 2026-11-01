@@ -38,6 +38,16 @@ bool gtg_cache_is_fresh(const gtg_departure_cache_t *cache, size_t index)
     return index < cache->len && is_fresh(&cache->nodes[index], time(NULL));
 }
 
+int32_t gtg_cache_seconds_until_due(const gtg_departure_cache_t *cache, size_t index)
+{
+    if (index >= cache->len || cache->nodes[index].attempted == 0) {
+        return 0;
+    }
+
+    double since = difftime(time(NULL), cache->nodes[index].attempted);
+    return since >= GTG_CACHE_MAX_AGE_S ? 0 : (int32_t)(GTG_CACHE_MAX_AGE_S - since);
+}
+
 size_t gtg_cache_remaining(const gtg_departure_cache_t *cache, size_t index,
                            int32_t remaining[GTG_DEPARTURES_UPCOMING_MAX])
 {
@@ -84,10 +94,12 @@ static esp_err_t fetch_stop(gtg_departure_cache_t *cache, size_t index)
 
     time_t fetched_at = 0;
     esp_err_t err = gtg_departures_fetch_upcoming(stop_id, departures, count, upcoming, &fetched_at);
+    time_t attempted = time(NULL);
 
     for (size_t i = 0; i < count; i++) {
         gtg_departure_node_t *node = &cache->nodes[indices[i]];
         node->status = err;
+        node->attempted = attempted;
 
         if (err == ESP_OK) {
             node->ts = fetched_at;

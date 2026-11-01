@@ -190,7 +190,8 @@ esp_err_t gtg_dev_config_get_api_key(gtg_api_key_t which, char *out, size_t out_
  * \brief Adds a departure to track to realtime_targets
  *
  * A target is unique by its stop id and its departure's line, mode and destination.
- * The stop's name and town are only kept for showing it.
+ * The stop's name and town are only kept for showing it. GTG_EV_TARGET_ADDED is posted once
+ * it is added.
  *
  * \param *target   the stop and departure, with NUL terminated fields and a non-empty
  *                  stop id, mode and destination
@@ -206,6 +207,8 @@ esp_err_t gtg_dev_config_add_target(const trafiklab_target_t *target, size_t *co
 
 /**
  * \brief Removes a departure from realtime_targets, the others keep their order
+ *
+ * GTG_EV_TARGET_REMOVED is posted once it is removed.
  *
  * \param *stop_id    stop group id of the target
  * \param *departure  line, mode and destination of the target

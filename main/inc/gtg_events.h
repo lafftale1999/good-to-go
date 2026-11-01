@@ -22,7 +22,10 @@ typedef enum {
     GTG_EV_BUTTON_DOUBLE_CLICKED, /*!< a button was clicked twice in a row, see button */
     GTG_EV_BUTTON_SHORT_HOLD,   /*!< a button was released after the short hold time, see button */
     GTG_EV_BUTTON_LONG_HOLD,    /*!< a button has been held for the long hold time, still pushed, see button */
-    GTG_EV_CONFIG_APPLIED,      /*!< GTG_DEV_FLAG_VALID_CONFIG got set, the device is fully configured */
+    GTG_EV_CONFIG_APPLIED,      /*!< GTG_DEV_FLAG_VALID_CONFIG got set, or the user applied the valid
+                                     configuration with the "Done" button, see /api/config/apply */
+    GTG_EV_TARGET_ADDED,        /*!< a departure was added to realtime_targets */
+    GTG_EV_TARGET_REMOVED,      /*!< a departure was removed from realtime_targets */
 } gtg_event_type_t;
 
 typedef struct {
