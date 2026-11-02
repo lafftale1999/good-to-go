@@ -16,8 +16,10 @@
 #define GTG_DEV_CONFIG_MAX_TARGETS  8
 
 /**
- * Runtime state of the device, one bit each in gtg_dev_config_t.flags. They are not saved,
- * the modules that own each state keep them up to date while the device runs
+ * Runtime state of the device, one bit each in gtg_dev_config_t.flags. They are not saved to
+ * NVS, the modules that own each state keep them up to date while the device runs. Before deep
+ * sleep they are kept in RTC memory, so the wake can skip the checks that were done, see
+ * gtg_dev_config_keep_flags_for_wake()
  */
 typedef enum {
     GTG_DEV_FLAG_CONNECTED      = 1 << 0,   /*!< the station is connected with an IP address */
@@ -144,6 +146,24 @@ void gtg_dev_config_set_flag(gtg_dev_flag_t flag, bool on);
  * \brief Returns the gtg_dev_flag_t bits that are set
  */
 uint32_t gtg_dev_config_get_flags(void);
+
+/**
+ * \brief Keeps the current gtg_dev_flag_t bits in RTC memory, call right before deep sleep
+ *
+ * RTC memory survives deep sleep but not a power off, so only a wake finds them, see
+ * gtg_dev_config_take_wake_flags().
+ */
+void gtg_dev_config_keep_flags_for_wake(void);
+
+/**
+ * \brief Returns the gtg_dev_flag_t bits kept by gtg_dev_config_keep_flags_for_wake() and
+ *        forgets them, so they are only found once
+ *
+ * The runtime flags are not changed, the caller restores the states they stand for.
+ *
+ * \return the kept bits, 0 when none were kept, e.g. after a power on
+ */
+uint32_t gtg_dev_config_take_wake_flags(void);
 
 /**
  * \brief Blocks until all the given gtg_dev_flag_t bits are set

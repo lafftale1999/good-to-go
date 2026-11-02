@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/event_groups.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "nvs.h"
 
@@ -42,6 +43,12 @@ static EventGroupHandle_t s_flag_events = NULL;
 
 /* counts every change of realtime_targets, runtime only */
 static volatile uint32_t s_targets_version = 0;
+
+/* the flags when the device went to deep sleep, kept in RTC memory which survives the sleep.
+ * A power on starts it from these values, the magic tells a kept value from a stale one */
+#define WAKE_FLAGS_MAGIC        0x67746731u     /* "gtg1" */
+static RTC_DATA_ATTR uint32_t s_wake_flags_magic = 0;
+static RTC_DATA_ATTR uint32_t s_wake_flags = 0;
 
 static esp_err_t save_locked(void);
 
@@ -140,6 +147,25 @@ uint32_t gtg_dev_config_get_flags(void)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     uint32_t flags = s_config.flags;
     xSemaphoreGive(s_mutex);
+
+    return flags;
+}
+
+void gtg_dev_config_keep_flags_for_wake(void)
+{
+    uint32_t flags = gtg_dev_config_get_flags();
+    s_wake_flags = flags;
+    s_wake_flags_magic = WAKE_FLAGS_MAGIC;
+    ESP_LOGI(TAG, "kept the flags 0x%02lx for the wake", (unsigned long)flags);
+}
+
+uint32_t gtg_dev_config_take_wake_flags(void)
+{
+    uint32_t flags = s_wake_flags_magic == WAKE_FLAGS_MAGIC ? s_wake_flags : 0;
+
+    /* once only, a later restart without a sleep must not find them */
+    s_wake_flags_magic = 0;
+    s_wake_flags = 0;
 
     return flags;
 }

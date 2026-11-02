@@ -34,6 +34,7 @@
 #define BOOT_WIFI_TIMEOUT_MS    60000
 #define NTP_SYNC_TIMEOUT_MS     30000
 
+
 /* room for the NVS erase and LCD writes of a factory reset */
 #define EVENT_TASK_STACK_SIZE   4096
 #define EVENT_TASK_PRIORITY     5
@@ -197,6 +198,10 @@ static void log_event(const gtg_event_t *event)
     case GTG_EV_CONFIG_LOGIN:
         ESP_LOGI(TAG, "event: %s", gtg_event_type_name(event->type));
         break;
+    case GTG_EV_TIME_CORRECTED:
+        ESP_LOGI(TAG, "event: %s, %+ld s", gtg_event_type_name(event->type),
+                 (long)event->time.correction_s);
+        break;
     default:
         ESP_LOGW(TAG, "event: unknown type %d", event->type);
         break;
@@ -262,6 +267,10 @@ static void go_to_sleep(gtg_app_handle_t app, const char *reason)
     gtg_lcd_clear(&app->lcd);
     gtg_lcd_set_backlight(&app->lcd, false);
 
+    /* the wake starts from these instead of checking everything again */
+    gtg_dev_config_keep_flags_for_wake();
+    wifi_station_keep_ap_for_wake();
+
     gtg_sleep_start();
 }
 
@@ -324,31 +333,49 @@ static void event_task(void *arg)
     }
 }
 
-/* Connects with the stored credentials. False when none are stored or the retries fail */
-static bool connect_stored_wifi(void)
+/* Starts connecting with the stored credentials without waiting, see wait_stored_wifi(). On a
+ * wake straight to the access point kept before the sleep, see wifi_station_connect_kept() */
+static esp_err_t start_stored_wifi(bool kept_ap)
 {
     char ssid[GTG_DEV_CONFIG_SSID_MAX_LEN + 1];
     char pass[GTG_DEV_CONFIG_PASS_MAX_LEN + 1];
 
     esp_err_t err = gtg_dev_config_get_wifi(ssid, pass);
     if (err == ESP_OK) {
-        err = wifi_station_connect(ssid, pass);
+        err = kept_ap ? wifi_station_connect_kept(ssid, pass) : wifi_station_connect(ssid, pass);
     }
     memset(pass, 0, sizeof(pass));
 
     if (err == ESP_ERR_NOT_FOUND) {
         ESP_LOGI(TAG, "no WiFi stored");
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not connect to the stored WiFi SSID:%s: %s", ssid, esp_err_to_name(err));
+    }
+
+    return err;
+}
+
+/* Waits for the connection start_stored_wifi() started, its result is passed in. False when
+ * none are stored or the retries fail */
+static bool wait_stored_wifi(esp_err_t started)
+{
+    if (started != ESP_OK) {
         return false;
     }
-    if (err == ESP_OK) {
-        err = wifi_station_wait_result(pdMS_TO_TICKS(BOOT_WIFI_TIMEOUT_MS));
-    }
+
+    esp_err_t err = wifi_station_wait_result(pdMS_TO_TICKS(BOOT_WIFI_TIMEOUT_MS));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "could not connect to the stored WiFi SSID:%s: %s", ssid, esp_err_to_name(err));
+        ESP_LOGW(TAG, "could not connect to the stored WiFi: %s", esp_err_to_name(err));
         return false;
     }
 
     return true;
+}
+
+/* Connects with the stored credentials. False when none are stored or the retries fail */
+static bool connect_stored_wifi(void)
+{
+    return wait_stored_wifi(start_stored_wifi(false));
 }
 
 /* Verifies each stored key that isn't verified yet, e.g. by the user meanwhile. A key that
@@ -422,6 +449,58 @@ static esp_err_t try_full_init(gtg_app_handle_t app) {
     wait_for_time(app);
 
     verify_stored_keys();
+
+    return (gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG) ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+/* Counts the stored keys as verified, as they were before the sleep */
+static void restore_verified_keys(void)
+{
+    for (gtg_api_key_t which = 0; which < GTG_API_KEY_COUNT; which++) {
+        /* logs the result itself, a key that can't be restored is verified in the configuration */
+        gtg_api_keys_restore(which);
+    }
+}
+
+/*
+ * Starts a wake from deep sleep with the flags kept from before the sleep, see
+ * gtg_dev_config_keep_flags_for_wake(). What was done before the sleep isn't done again:
+ *   - the clock kept through the sleep is used. SNTP corrects its drift in the background, see
+ *     GTG_EV_TIME_CORRECTED
+ *   - the stored keys count as verified, without a request
+ *   - the departures come from the stored configuration, as on a power on
+ * Only the WiFi has to connect again, which gtg_app_init() already started, its result is in
+ * wifi_started. A flag that wasn't set before the sleep isn't checked either, the configuration
+ * starts at its step instead.
+ *
+ * \return ESP_OK                the configuration is valid
+ * \return ESP_FAIL              not connected before the sleep, or the WiFi didn't connect
+ * \return ESP_ERR_INVALID_STATE something else wasn't done before the sleep
+ */
+static esp_err_t try_wake_init(gtg_app_handle_t app, uint32_t kept, esp_err_t wifi_started)
+{
+    ESP_LOGI(TAG, "woke with the flags 0x%02lx kept from before the sleep", (unsigned long)kept);
+
+    bool time_restored = (kept & GTG_DEV_FLAG_TIME_SYNCED) && gtg_ntp_restore_time() == ESP_OK;
+
+    if (kept & GTG_DEV_FLAG_KEYS_VERIFIED) {
+        restore_verified_keys();
+    }
+
+    if (!(kept & GTG_DEV_FLAG_CONNECTED)) {
+        ESP_LOGW(TAG, "not connected before the sleep, starting the configuration");
+        return ESP_FAIL;
+    }
+
+    if (!wait_stored_wifi(wifi_started)) {
+        return ESP_FAIL;
+    }
+
+    /* with the kept clock SNTP syncs in the background, without it the time is waited for */
+    start_ntp(app);
+    if (!time_restored) {
+        wait_for_time(app);
+    }
 
     return (gtg_dev_config_get_flags() & GTG_DEV_FLAG_VALID_CONFIG) ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
@@ -647,6 +726,23 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
 
+    /* the flags kept before the sleep, 0 after a power on, which checks everything */
+    uint32_t wake_flags = gtg_sleep_woke_by_button() ? gtg_dev_config_take_wake_flags() : 0;
+
+    /* the configuration holds the WiFi credentials, so it is loaded first. Reading it from NVS
+     * takes a moment, the WiFi connect much longer */
+    ESP_ERROR_CHECK(gtg_dev_config_init());
+    ESP_ERROR_CHECK(wifi_station_init());
+    ESP_ERROR_CHECK(gtg_api_keys_init());
+    esp_err_t loaded = gtg_dev_config_load();
+
+    /* on a wake that was connected before the sleep the connect starts right away, so it runs
+     * while the button, the screen and the rest start, see try_wake_init() */
+    esp_err_t wifi_started = ESP_ERR_INVALID_STATE;
+    if (loaded == ESP_OK && (wake_flags & GTG_DEV_FLAG_CONNECTED)) {
+        wifi_started = start_stored_wifi(true);
+    }
+
     /* the device works without the button, so a failure is only logged */
     if (gtg_button_init() != ESP_OK) {
         ESP_LOGW(TAG, "button unavailable");
@@ -654,7 +750,11 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
 
     /* the device works without the screen, so a missing one is only logged */
     if (gtg_lcd_init(&app->lcd) == ESP_OK) {
-        gtg_lcd_print(&app->lcd, "Configuring...", "Soon good to go!");
+        if (wake_flags != 0) {
+            gtg_lcd_print(&app->lcd, "Waking up...", "Soon good to go!");
+        } else {
+            gtg_lcd_print(&app->lcd, "Configuring...", "Soon good to go!");
+        }
     }
 
     /* after the LCD, which it prints the sleep message on. The idle time counts from the event
@@ -663,14 +763,10 @@ esp_err_t gtg_app_init(gtg_app_handle_t *out_app)
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
 
-    ESP_ERROR_CHECK(gtg_dev_config_init());
-    ESP_ERROR_CHECK(wifi_station_init());
-    ESP_ERROR_CHECK(gtg_api_keys_init());
-
     /* a device with a valid stored configuration starts without the configuration */
-    ret = gtg_dev_config_load();
+    ret = loaded;
     if (ret == ESP_OK) {
-        ret = try_full_init(app);
+        ret = wake_flags != 0 ? try_wake_init(app, wake_flags, wifi_started) : try_full_init(app);
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "started with the stored configuration");
         } else {
@@ -1061,10 +1157,13 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
     /* before the first departure, so the first click shows it */
     app->index = app->cache.len;
 
+    /* one connection for all of them, only the first pays for the TLS handshake */
     bool config_started = false;
+    gtg_cache_begin_batch(&app->cache);
     for (size_t i = 0; i < app->cache.len && !config_started; i++) {
         config_started = !refresh_departure(app, i);
     }
+    gtg_cache_end_batch(&app->cache);
 
     /* after the first setup the configuration mode is still on */
     if (!config_started && !show_config_hint(app)) {
@@ -1147,6 +1246,14 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
                 case GTG_EV_CONFIG_LOGIN:
                     stop_redraw(app);
                     show_config_logged_in(app);
+                    break;
+
+                case GTG_EV_TIME_CORRECTED:
+                    /* the departures fetched before it count from the wrong time until moved */
+                    gtg_cache_correct_clock(&app->cache, event.time.correction_s);
+                    if (app->redraw) {
+                        redraw_departure(app);
+                    }
                     break;
 
                 default:

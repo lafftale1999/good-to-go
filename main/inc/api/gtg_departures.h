@@ -62,6 +62,25 @@ typedef struct {
 } gtg_departures_upcoming_t;
 
 /**
+ * A connection to Trafiklab kept open over several fetches, so only the first one pays for the
+ * TLS handshake. Open it for a batch of fetches and close it after, see
+ * gtg_departures_conn_open(). Used from one task at a time.
+ */
+typedef struct gtg_departures_conn gtg_departures_conn_t;
+
+/**
+ * \brief Prepares a connection for gtg_departures_fetch_upcoming(), the first fetch connects
+ *
+ * \return the connection, NULL when out of memory
+ */
+gtg_departures_conn_t *gtg_departures_conn_open(void);
+
+/**
+ * \brief Closes the connection, NULL is ignored
+ */
+void gtg_departures_conn_close(gtg_departures_conn_t *conn);
+
+/**
  * \brief Fetches the next departures from a stop for several of its departures at once
  *
  * One request returns everything departing from the stop group from now on, which is matched
@@ -70,6 +89,8 @@ typedef struct {
  * departures and those more than GTG_DEPARTURES_UPCOMING_WINDOW_S ahead are skipped, and each
  * target keeps its GTG_DEPARTURES_UPCOMING_MAX soonest. Blocks for the request.
  *
+ * \param *conn        connection to reuse, see gtg_departures_conn_open(). NULL connects for this
+ *                     request only. A failed request closes it, the next one connects again
  * \param *stop_id     stop group id, 1-9 digits
  * \param *targets     the departures from the stop to look for
  * \param count        number of targets, at least 1
@@ -86,7 +107,8 @@ typedef struct {
  * \return ESP_ERR_NO_MEM           out of memory
  * \return other                    the request failed, e.g. no internet access
  */
-esp_err_t gtg_departures_fetch_upcoming(const char *stop_id, const gtg_departure_option_t *targets,
+esp_err_t gtg_departures_fetch_upcoming(gtg_departures_conn_t *conn, const char *stop_id,
+                                        const gtg_departure_option_t *targets,
                                         size_t count, gtg_departures_upcoming_t *upcoming,
                                         time_t *fetched_at);
 

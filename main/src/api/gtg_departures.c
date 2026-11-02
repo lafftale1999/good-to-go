@@ -42,6 +42,13 @@ _Static_assert((GTG_DEPARTURES_SAMPLES - 1) * SAMPLE_STEP_MIN < 24 * 60, "sample
 
 static const char *TAG = "departures";
 
+/* the client's URL is replaced by each request, this only gives it the host to connect to */
+#define CONN_BASE_URL           "https://realtime-api.trafiklab.se/"
+
+struct gtg_departures_conn {
+    esp_http_client_handle_t client;
+};
+
 /*
  * Splits the response into its departures while it is received. Only the nesting, strings and
  * the top-level key in front of each array are tracked, so a response of any size goes through a
@@ -315,7 +322,8 @@ static void stream_feed(departure_stream_t *stream, const char *data, size_t len
 /* Feeds a successful response to the stream, other responses are only checked by status */
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
-    if (evt->event_id == HTTP_EVENT_ON_DATA && esp_http_client_get_status_code(evt->client) == 200) {
+    if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data != NULL
+        && esp_http_client_get_status_code(evt->client) == 200) {
         stream_feed(evt->user_data, evt->data, evt->data_len);
     }
 
@@ -521,7 +529,55 @@ esp_err_t gtg_departures_list_options(const char *stop_id, gtg_departure_option_
     return ESP_OK;
 }
 
-esp_err_t gtg_departures_fetch_upcoming(const char *stop_id, const gtg_departure_option_t *targets,
+/* An HTTPS client to Trafiklab that sends JSON requests. Its user_data is set per request */
+static esp_http_client_handle_t client_create(const char *url, void *user_data)
+{
+    esp_http_client_config_t config = {
+        .url               = url,
+        .timeout_ms        = API_REQUEST_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler     = http_event_handler,
+        .user_data         = user_data,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client != NULL && esp_http_client_set_header(client, "Accept", "application/json") != ESP_OK) {
+        esp_http_client_cleanup(client);
+        client = NULL;
+    }
+
+    return client;
+}
+
+gtg_departures_conn_t *gtg_departures_conn_open(void)
+{
+    gtg_departures_conn_t *conn = calloc(1, sizeof(*conn));
+    if (conn == NULL) {
+        return NULL;
+    }
+
+    /* nothing is sent yet, the first request connects */
+    conn->client = client_create(CONN_BASE_URL, NULL);
+    if (conn->client == NULL) {
+        free(conn);
+        return NULL;
+    }
+
+    return conn;
+}
+
+void gtg_departures_conn_close(gtg_departures_conn_t *conn)
+{
+    if (conn == NULL) {
+        return;
+    }
+
+    esp_http_client_cleanup(conn->client);
+    free(conn);
+}
+
+esp_err_t gtg_departures_fetch_upcoming(gtg_departures_conn_t *conn, const char *stop_id,
+                                        const gtg_departure_option_t *targets,
                                         size_t count, gtg_departures_upcoming_t *upcoming,
                                         time_t *fetched_at)
 {
@@ -553,22 +609,28 @@ esp_err_t gtg_departures_fetch_upcoming(const char *stop_id, const gtg_departure
     char url[DEPARTURES_URL_MAX_LEN];
     snprintf(url, sizeof(url), UPCOMING_URL, stop_id, key);
 
-    esp_http_client_config_t config = {
-        .url               = url,
-        .timeout_ms        = API_REQUEST_TIMEOUT_MS,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .event_handler     = http_event_handler,
-        .user_data         = &stream,
-    };
+    /* the shared connection is borrowed, without one the request has a client of its own */
+    esp_http_client_handle_t client = NULL;
+    if (stream.departure != NULL) {
+        client = conn != NULL ? conn->client : client_create(url, &stream);
+    }
 
-    esp_http_client_handle_t client = stream.departure != NULL ? esp_http_client_init(&config) : NULL;
-    esp_err_t err = client != NULL ? esp_http_client_set_header(client, "Accept", "application/json")
-                                   : ESP_ERR_NO_MEM;
+    esp_err_t err = client != NULL ? ESP_OK : ESP_ERR_NO_MEM;
+    if (err == ESP_OK && conn != NULL) {
+        err = esp_http_client_set_user_data(client, &stream);
+    }
     if (err == ESP_OK) {
         err = fetch_sample(client, url, &stream);
     }
 
-    if (client != NULL) {
+    if (conn != NULL && client != NULL) {
+        /* the stream is gone after this, and a failed request may leave the connection
+         * broken, so the next request connects again */
+        esp_http_client_set_user_data(client, NULL);
+        if (err != ESP_OK) {
+            esp_http_client_close(client);
+        }
+    } else if (client != NULL) {
         esp_http_client_cleanup(client);
     }
     memset(url, 0, sizeof(url));

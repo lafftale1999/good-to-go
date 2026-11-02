@@ -227,6 +227,39 @@ esp_err_t gtg_api_keys_set(gtg_api_key_t which, const char *key)
     return ESP_OK;
 }
 
+esp_err_t gtg_api_keys_restore(gtg_api_key_t which)
+{
+    if (!is_valid_service(which)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_event_group == NULL) {
+        ESP_LOGE(TAG, "not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const api_service_t *service = &SERVICES[which];
+
+    char key[GTG_API_KEY_MAX_LEN + 1];
+    esp_err_t err = gtg_dev_config_get_api_key(which, key, sizeof(key));
+    bool valid = err == ESP_OK && is_valid_key(key);
+    memset(key, 0, sizeof(key));
+
+    if (!valid) {
+        ESP_LOGW(TAG, "no %s key stored to restore", service->name);
+        return err == ESP_OK ? ESP_ERR_INVALID_ARG : err;
+    }
+
+    EventBits_t bits = xEventGroupSetBits(s_event_group, BIT(which));
+    if ((bits & ALL_KEYS_SET_BITS) == ALL_KEYS_SET_BITS) {
+        gtg_dev_config_set_flag(GTG_DEV_FLAG_KEYS_VERIFIED, true);
+    }
+
+    ESP_LOGI(TAG, "%s key verified before the sleep", service->name);
+
+    return ESP_OK;
+}
+
 bool gtg_api_keys_is_set(gtg_api_key_t which)
 {
     if (!is_valid_service(which) || s_event_group == NULL) {

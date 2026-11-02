@@ -32,7 +32,8 @@ It has saved me a lot of trouble and freezing, and I hope it can help you too!
 
   While the configuration page is on, only the holds work: clicks, double-clicks and five-clicks are ignored, so they can't hide
   the login password. Hold 5 s to turn the page off first.
-* It goes to deep sleep after 5 minutes without use, or on a five-click. One push wakes it.
+* It goes to deep sleep after 5 minutes without use, or on a five-click. One push wakes it. A wake skips what was
+  already done before the sleep (key checks, clock sync) and only reconnects the WiFi, so it is running sooner.
 
 Departures come from [Trafiklab](https://www.trafiklab.se/), which covers public transport in all of Sweden.
 
