@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "esp_attr.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -45,6 +47,34 @@ static int s_retry_num = 0;
 /* Set by wifi_station_connect() when it disconnects from the network it is connected to. That
  * disconnect arrives after the new attempt has started, and must not count as a failed retry */
 static volatile bool s_own_disconnect = false;
+
+/* The access point connected to when the device went to deep sleep, kept in RTC memory which
+ * survives the sleep. The wake connects to its channel and BSSID directly, without a scan */
+#define KEPT_AP_MAGIC   0x67746170u     /* "gtap" */
+static RTC_DATA_ATTR uint32_t s_kept_ap_magic = 0;
+static RTC_DATA_ATTR uint8_t  s_kept_ap_bssid[6];
+static RTC_DATA_ATTR uint8_t  s_kept_ap_channel = 0;
+
+/* set while the attempt goes to the kept access point only, see wifi_station_connect_kept().
+ * Its first failure falls back to a full scan instead of counting as a retry */
+static volatile bool s_direct_attempt = false;
+
+/* Drops the kept channel and BSSID from the driver's config and connects again with a full scan */
+static void fall_back_to_scan(uint8_t reason)
+{
+    ESP_LOGW(TAG, "the kept access point didn't answer (reason %u), scanning instead", reason);
+
+    wifi_config_t wifi_config;
+    if (esp_wifi_get_config(WIFI_IF_STA, &wifi_config) == ESP_OK) {
+        wifi_config.sta.bssid_set = false;
+        wifi_config.sta.channel = 0;
+        wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        memset(&wifi_config, 0, sizeof(wifi_config));
+    }
+
+    esp_wifi_connect();
+}
 
 static void post_wifi_event(gtg_event_type_t type, bool connected, bool requested, uint8_t reason,
                             uint8_t retry)
@@ -122,6 +152,14 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
         s_last_reason = event->reason;
 
+        /* the access point may have moved to another channel, which only a scan finds */
+        if (s_direct_attempt && !(bits & WIFI_CONNECTED_BIT)) {
+            s_direct_attempt = false;
+            fall_back_to_scan(event->reason);
+            return;
+        }
+        s_direct_attempt = false;
+
         if (s_retry_num < WIFI_STA_MAXIMUM_RETRY) {
             s_retry_num++;
             s_state = WIFI_STATION_CONNECTING;
@@ -137,6 +175,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_direct_attempt = false;
         s_retry_num = 0;
         s_last_reason = 0;
 
@@ -243,7 +282,8 @@ esp_err_t wifi_station_init(void)
     return err;
 }
 
-esp_err_t wifi_station_connect(const char *ssid, const char *pass)
+/* Starts connecting, to the given channel and BSSID only when bssid isn't NULL */
+static esp_err_t connect_to(const char *ssid, const char *pass, const uint8_t *bssid, uint8_t channel)
 {
     esp_err_t err;
 
@@ -272,6 +312,14 @@ esp_err_t wifi_station_connect(const char *ssid, const char *pass)
     memcpy(wifi_config.sta.ssid, ssid, strnlen(ssid, sizeof(wifi_config.sta.ssid)));
     memcpy(wifi_config.sta.password, pass, strnlen(pass, sizeof(wifi_config.sta.password)));
 
+    if (bssid != NULL) {
+        /* only the kept channel is scanned, for the kept access point */
+        memcpy(wifi_config.sta.bssid, bssid, sizeof(wifi_config.sta.bssid));
+        wifi_config.sta.bssid_set = true;
+        wifi_config.sta.channel = channel;
+        wifi_config.sta.scan_method = WIFI_FAST_SCAN;
+    }
+
     err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
     /* don't leave the password lying around on the stack, the driver keeps its own copy */
@@ -281,20 +329,62 @@ esp_err_t wifi_station_connect(const char *ssid, const char *pass)
 
     s_retry_num = 0;
     s_last_reason = 0;
+    s_direct_attempt = bssid != NULL;
     s_state = WIFI_STATION_CONNECTING;
     xEventGroupClearBits(s_wifi_event_group, WIFI_FAILED_BIT);
 
     err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
+        s_direct_attempt = false;
         s_state = WIFI_STATION_FAILED;
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
         return err;
     }
 
-    ESP_LOGI(TAG, "connecting to SSID:%s", ssid);
+    if (bssid != NULL) {
+        ESP_LOGI(TAG, "connecting to SSID:%s on channel %u, " MACSTR, ssid, channel, MAC2STR(bssid));
+    } else {
+        ESP_LOGI(TAG, "connecting to SSID:%s", ssid);
+    }
 
     return ESP_OK;
+}
+
+esp_err_t wifi_station_connect(const char *ssid, const char *pass)
+{
+    return connect_to(ssid, pass, NULL, 0);
+}
+
+void wifi_station_keep_ap_for_wake(void)
+{
+    s_kept_ap_magic = 0;
+
+    wifi_ap_record_t ap;
+    if (s_state != WIFI_STATION_CONNECTED || esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return;
+    }
+
+    memcpy(s_kept_ap_bssid, ap.bssid, sizeof(s_kept_ap_bssid));
+    s_kept_ap_channel = ap.primary;
+    s_kept_ap_magic = KEPT_AP_MAGIC;
+
+    ESP_LOGI(TAG, "kept the access point for the wake: channel %u, " MACSTR,
+             s_kept_ap_channel, MAC2STR(s_kept_ap_bssid));
+}
+
+esp_err_t wifi_station_connect_kept(const char *ssid, const char *pass)
+{
+    bool kept = s_kept_ap_magic == KEPT_AP_MAGIC;
+
+    /* once only, a later connect scans as usual */
+    s_kept_ap_magic = 0;
+
+    if (!kept) {
+        return connect_to(ssid, pass, NULL, 0);
+    }
+
+    return connect_to(ssid, pass, s_kept_ap_bssid, s_kept_ap_channel);
 }
 
 /* Keeps results sorted by RSSI with one entry per SSID, the weakest entry drops out when full */

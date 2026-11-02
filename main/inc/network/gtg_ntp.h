@@ -34,9 +34,30 @@ esp_err_t gtg_ntp_init(void);
 esp_err_t gtg_ntp_wait_for_sync(uint32_t timeout_ms);
 
 /**
- * \brief Checks whether the system time has been set by SNTP
+ * \brief Uses the clock kept through deep sleep, before SNTP has synced it
  *
- * \return true if the time has been synchronized at least once
+ * The RTC keeps the system time through deep sleep. This sets the timezone and
+ * GTG_DEV_FLAG_TIME_SYNCED, so the time can be used at once. The sleep clock drifts, so start
+ * SNTP as well, which corrects it in the background. Its first sync posts GTG_EV_TIME_CORRECTED
+ * with how far it moved the clock, when it moved it a second or more.
+ * gtg_ntp_wait_for_sync() still waits for SNTP.
+ *
+ * \return ESP_OK                the kept clock is in use
+ * \return ESP_ERR_INVALID_STATE the clock was never set, e.g. after a power on
+ */
+esp_err_t gtg_ntp_restore_time(void);
+
+/**
+ * \brief Whether SNTP has synced the clock this boot, unlike gtg_ntp_is_time_set() not the
+ *        clock kept through deep sleep
+ */
+bool gtg_ntp_is_synced(void);
+
+/**
+ * \brief Checks whether the system time can be used
+ *
+ * \return true once SNTP has synced it, or the clock kept through deep sleep is in use, see
+ *         gtg_ntp_restore_time()
  */
 bool gtg_ntp_is_time_set(void);
 

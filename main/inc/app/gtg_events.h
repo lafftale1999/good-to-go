@@ -30,6 +30,7 @@ typedef enum {
     GTG_EV_TARGET_ADDED,        /*!< a departure was added to realtime_targets */
     GTG_EV_TARGET_REMOVED,      /*!< a departure was removed from realtime_targets */
     GTG_EV_CONFIG_LOGIN,        /*!< a user logged in to the configuration page, see /api/login */
+    GTG_EV_TIME_CORRECTED,      /*!< SNTP corrected the clock kept through deep sleep, see time */
 } gtg_event_type_t;
 
 typedef struct {
@@ -47,6 +48,10 @@ typedef struct {
         struct {
             gtg_api_key_t which;
         } api_key;              /*!< GTG_EV_API_KEY_REJECTED */
+
+        struct {
+            int32_t correction_s; /*!< how far the clock moved, positive when it was behind */
+        } time;                 /*!< GTG_EV_TIME_CORRECTED */
 
         struct {
             uint8_t id;

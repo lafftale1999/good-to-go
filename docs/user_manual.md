@@ -199,8 +199,12 @@ After **5 minutes** without a button push, or without use of the setup page, the
 **Click the button five times quickly to put it to sleep at once**, e.g. when you leave home. This doesn't work
 while the setup page is on: turn it off first by holding the button for 5 seconds.
 
-**Push the button once to wake it.** It then starts up again, which takes a few seconds: it connects to your WiFi,
-checks the keys and fetches all departures (`Fetching...`), then shows `U R Good To Go!`.
+**Push the button once to wake it.** The screen shows `Waking up...` while it reconnects to your WiFi, then it
+fetches all departures (`Fetching...`) and shows `U R Good To Go!`. A wake is quicker than turning the device on:
+it remembers what was set up before it went to sleep, so it doesn't check the keys or wait for the clock again.
+
+If something wasn't set up when it went to sleep, e.g. it fell asleep on the setup page, it wakes straight into the
+setup page at that step. After a power cut it starts as when turned on, checking everything.
 
 # Messages on the screen
 
@@ -209,6 +213,7 @@ The departure messages on the bottom row keep the departure's name on the top ro
 | Top row            | Bottom row         | Meaning                                                  |
 |------------------------|------------------------|----------------------------------------------------|
 | `Configuring...`   | `Soon good to go!` | Starting up. |
+| `Waking up...`     | `Soon good to go!` | Waking from sleep, reconnecting to the WiFi. |
 | `WIFI: GTG...`     | `PASS: ...`        | The setup page is on and the device has its own network. Join it to set it up. |
 | `goodtogo.local`   | `PASS: ...`        | Open `https://goodtogo.local` and log in with this password, which is new each time the setup page is turned on. |
 | `Configuring...`   |                    | Someone logged in to the setup page. |

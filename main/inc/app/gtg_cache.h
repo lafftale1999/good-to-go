@@ -22,6 +22,8 @@ typedef struct _gtg_departure_node_ {
     uint8_t   count;                                /*!< 0-GTG_DEPARTURES_UPCOMING_MAX in use */
     esp_err_t status;                               /*!< result of the last fetch */
     time_t    attempted;                            /*!< when last fetched, also when it failed */
+    bool      kept_clock;                           /*!< fetched with the clock kept through deep
+                                                         sleep, before SNTP corrected it */
 } gtg_departure_node_t;
 
 /**
@@ -37,6 +39,7 @@ typedef struct _gtg_departure_cache_ {
     size_t               len;
     uint32_t             version;    /*!< gtg_dev_config_get_targets_version() of the copy */
     bool                 synced;
+    gtg_departures_conn_t *conn;     /*!< shared by the fetches of a batch, NULL outside one */
 } gtg_departure_cache_t;
 
 /**
@@ -60,9 +63,35 @@ bool gtg_cache_sync(gtg_departure_cache_t *cache);
 esp_err_t gtg_cache_refresh(gtg_departure_cache_t *cache, size_t index);
 
 /**
- * \brief Fetches every node that is GTG_CACHE_MAX_AGE_S or older, one request per stop group
+ * \brief Moves the nodes fetched with the clock kept through deep sleep onto the clock SNTP
+ *        corrected, see GTG_EV_TIME_CORRECTED
+ *
+ * The departures count from their fetch time, which the kept clock got wrong by as much as SNTP
+ * moved it. Their fetch time and seconds are moved by that, so they count from the right time
+ * and are fetched again when due. Nodes fetched after the correction are left as they are.
+ *
+ * \param correction_s  how far SNTP moved the clock, positive when it was behind
+ */
+void gtg_cache_correct_clock(gtg_departure_cache_t *cache, int32_t correction_s);
+
+/**
+ * \brief Fetches every node that is GTG_CACHE_MAX_AGE_S or older, one request per stop group,
+ *        all over one connection
  */
 void gtg_cache_refresh_all(gtg_departure_cache_t *cache);
+
+/**
+ * \brief Starts a batch of fetches: until gtg_cache_end_batch(), every fetch reuses one
+ *        connection, so only the first pays for the TLS handshake
+ *
+ * Without the connection, e.g. out of memory, each fetch connects on its own as outside a batch.
+ */
+void gtg_cache_begin_batch(gtg_departure_cache_t *cache);
+
+/**
+ * \brief Ends the batch and closes its connection
+ */
+void gtg_cache_end_batch(gtg_departure_cache_t *cache);
 
 /**
  * \brief Whether the node at index was fetched less than GTG_CACHE_MAX_AGE_S ago, so

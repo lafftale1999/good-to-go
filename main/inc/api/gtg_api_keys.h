@@ -45,6 +45,21 @@ esp_err_t gtg_api_keys_init(void);
 esp_err_t gtg_api_keys_set(gtg_api_key_t which, const char *key);
 
 /**
+ * \brief Counts the stored key of a service as verified, without a request
+ *
+ * For a wake from deep sleep, when the key was verified before the sleep. A key the service
+ * rejects later is still reported with GTG_EV_API_KEY_REJECTED by the requests that use it.
+ *
+ * \param which the service the key belongs to
+ *
+ * \return ESP_OK                the stored key counts as verified
+ * \return ESP_ERR_INVALID_ARG   unknown service, or the stored key has an invalid format
+ * \return ESP_ERR_NOT_FOUND     no key stored for the service
+ * \return ESP_ERR_INVALID_STATE not initialized
+ */
+esp_err_t gtg_api_keys_restore(gtg_api_key_t which);
+
+/**
  * \brief Returns whether a verified key is stored for the service
  */
 bool gtg_api_keys_is_set(gtg_api_key_t which);

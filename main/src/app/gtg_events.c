@@ -92,6 +92,7 @@ const char *gtg_event_type_name(gtg_event_type_t type)
     case GTG_EV_TARGET_ADDED:       return "target added";
     case GTG_EV_TARGET_REMOVED:     return "target removed";
     case GTG_EV_CONFIG_LOGIN:       return "config login";
+    case GTG_EV_TIME_CORRECTED:     return "time corrected";
     default:                        return "unknown";
     }
 }

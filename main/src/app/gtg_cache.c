@@ -4,6 +4,8 @@
 #include <string.h>
 #include "esp_log.h"
 
+#include "gtg_ntp.h"
+
 static const char *TAG = "cache";
 
 bool gtg_cache_sync(gtg_departure_cache_t *cache)
@@ -80,7 +82,8 @@ static esp_err_t fetch_stop(gtg_departure_cache_t *cache, size_t index)
     const char *stop_id = cache->targets[index].stop.id;
 
     size_t indices[GTG_DEV_CONFIG_MAX_TARGETS];
-    gtg_departure_option_t departures[GTG_DEV_CONFIG_MAX_TARGETS];
+    /* zeroed, only count of them are filled, which -O2 can't tell */
+    gtg_departure_option_t departures[GTG_DEV_CONFIG_MAX_TARGETS] = { 0 };
     gtg_departures_upcoming_t upcoming[GTG_DEV_CONFIG_MAX_TARGETS];
     size_t count = 0;
 
@@ -92,14 +95,19 @@ static esp_err_t fetch_stop(gtg_departure_cache_t *cache, size_t index)
         }
     }
 
+    /* read before the fetch, which takes the time its seconds count from */
+    bool kept_clock = !gtg_ntp_is_synced();
+
     time_t fetched_at = 0;
-    esp_err_t err = gtg_departures_fetch_upcoming(stop_id, departures, count, upcoming, &fetched_at);
+    esp_err_t err = gtg_departures_fetch_upcoming(cache->conn, stop_id, departures, count, upcoming,
+                                                  &fetched_at);
     time_t attempted = time(NULL);
 
     for (size_t i = 0; i < count; i++) {
         gtg_departure_node_t *node = &cache->nodes[indices[i]];
         node->status = err;
         node->attempted = attempted;
+        node->kept_clock = kept_clock;
 
         if (err == ESP_OK) {
             node->ts = fetched_at;
@@ -128,11 +136,75 @@ esp_err_t gtg_cache_refresh(gtg_departure_cache_t *cache, size_t index)
     return fetch_stop(cache, index);
 }
 
+void gtg_cache_correct_clock(gtg_departure_cache_t *cache, int32_t correction_s)
+{
+    size_t moved = 0;
+
+    for (size_t i = 0; i < cache->len; i++) {
+        gtg_departure_node_t *node = &cache->nodes[i];
+        if (!node->kept_clock) {
+            continue;
+        }
+        node->kept_clock = false;
+        moved++;
+
+        if (node->attempted != 0) {
+            node->attempted += correction_s;
+        }
+        if (node->ts == 0) {
+            continue;
+        }
+        node->ts += correction_s;
+
+        /* counted from the moved fetch time, the ones that had left by then drop out */
+        uint8_t kept = 0;
+        for (uint8_t j = 0; j < node->count; j++) {
+            int32_t seconds = (int32_t)node->estimates[j] - correction_s;
+            if (seconds >= 0 && seconds <= UINT16_MAX) {
+                node->estimates[kept++] = (uint16_t)seconds;
+            }
+        }
+        node->count = kept;
+    }
+
+    if (moved > 0) {
+        ESP_LOGI(TAG, "%u targets moved %ld s onto the corrected clock", (unsigned)moved, (long)correction_s);
+    }
+}
+
+void gtg_cache_begin_batch(gtg_departure_cache_t *cache)
+{
+    if (cache->conn != NULL) {
+        return;
+    }
+
+    cache->conn = gtg_departures_conn_open();
+    if (cache->conn == NULL) {
+        ESP_LOGW(TAG, "no shared connection, each fetch connects on its own");
+    }
+}
+
+void gtg_cache_end_batch(gtg_departure_cache_t *cache)
+{
+    gtg_departures_conn_close(cache->conn);
+    cache->conn = NULL;
+}
+
 void gtg_cache_refresh_all(gtg_departure_cache_t *cache)
 {
+    /* the caller's batch is kept open */
+    bool own_batch = cache->conn == NULL;
+    if (own_batch) {
+        gtg_cache_begin_batch(cache);
+    }
+
     /* a fetch fills every node on its stop, so the later ones on a fetched stop are fresh */
     for (size_t i = 0; i < cache->len; i++) {
         gtg_cache_refresh(cache, i);
+    }
+
+    if (own_batch) {
+        gtg_cache_end_batch(cache);
     }
 }
 

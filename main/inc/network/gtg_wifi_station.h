@@ -58,6 +58,26 @@ esp_err_t wifi_station_init(void);
 esp_err_t wifi_station_connect(const char *ssid, const char *pass);
 
 /**
+ * \brief Keeps the channel and BSSID of the connected access point in RTC memory, call right
+ *        before deep sleep
+ *
+ * RTC memory survives deep sleep but not a power off. Nothing is kept when not connected.
+ */
+void wifi_station_keep_ap_for_wake(void);
+
+/**
+ * \brief Like wifi_station_connect(), but straight to the access point kept by
+ *        wifi_station_keep_ap_for_wake(), without scanning every channel
+ *
+ * Only the kept channel is scanned, for the kept BSSID. When that attempt fails, e.g. the access
+ * point moved to another channel, the station falls back to a full scan once, which doesn't count
+ * as a retry. The kept access point is used once, without one this is wifi_station_connect().
+ *
+ * \return like wifi_station_connect()
+ */
+esp_err_t wifi_station_connect_kept(const char *ssid, const char *pass);
+
+/**
  * \brief Scans for nearby networks and blocks until the scan is done
  *
  * Takes around 2 seconds. A running softAP has to leave its channel during the
