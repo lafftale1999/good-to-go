@@ -25,13 +25,14 @@ It has saved me a lot of trouble and freezing, and I hope it can help you too!
   | Push                   | Action                                                         |
   |------------------------|----------------------------------------------------------------|
   | Click                  | Show the next departure, refreshed if it is 60 s or older      |
-  | Triple-click           | Go to deep sleep                                               |
+  | Double-click           | Toggle the shown departure between its line and its stop name  |
+  | Five-click             | Go to deep sleep                                               |
   | Hold 5 s               | Turn the configuration page on or off, at 5 s while still held |
   | Hold 20 s              | Factory reset                                                  |
 
-  While the configuration page is on, only the holds work: clicks and triple-clicks are ignored, so they can't hide
+  While the configuration page is on, only the holds work: clicks, double-clicks and five-clicks are ignored, so they can't hide
   the login password. Hold 5 s to turn the page off first.
-* It goes to deep sleep after 5 minutes without use, or on a triple-click. One push wakes it.
+* It goes to deep sleep after 5 minutes without use, or on a five-click. One push wakes it.
 
 Departures come from [Trafiklab](https://www.trafiklab.se/), which covers public transport in all of Sweden.
 

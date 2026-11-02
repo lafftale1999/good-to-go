@@ -105,17 +105,22 @@ The screen then shows `U R Good To Go!` / `Press to search.` The setup page stay
 | Push                            | What happens                                                                  |
 |---------------------------------|-------------------------------------------------------------------------------|
 | **Click**                       | Shows the next departure. Fetches new times first if they are a minute or older. |
-| **Triple-click**                | Puts the device to sleep, see [Sleep](#sleep).                                |
+| **Double-click**                | Toggles the top row between the line and destination and the stop name.      |
+| **Five-click**                  | Puts the device to sleep, see [Sleep](#sleep).                                |
 | **Hold 5 seconds**              | Turns the setup page on or off.                                               |
 | **Hold 20 seconds**             | Factory reset, see [Factory reset](#factory-reset).                           |
 
 A click shows its departure after a short moment, as the device first checks that no more clicks follow. Two quick
-clicks move two departures forward, and a triple-click is three quick clicks.
+clicks are a double-click, and a five-click is five quick clicks. Three or four quick clicks do nothing.
+
+A double-click only works while a departure is shown. Each departure starts with its line and destination on the
+top row, a double-click shows its stop name instead, and the next double-click shows the line and destination again.
+A click to the next departure always starts with the line and destination.
 
 The holds happen while you still hold the button: at 5 seconds the setup page turns on or off, and you can let go.
 Keep holding to 20 seconds and the factory reset starts.
 
-**While the setup page is on, only the holds work.** Clicks and triple-clicks are ignored, so the password on the
+**While the setup page is on, only the holds work.** Clicks, double-clicks and five-clicks are ignored, so the password on the
 screen stays there. Hold the button for 5 seconds to turn the setup page off, then click as usual.
 
 ## Reading a departure
@@ -191,8 +196,8 @@ open that section in the settings.
 After **5 minutes** without a button push, or without use of the setup page, the device shows
 `Going to sleep` / `Press to wake` and turns the screen off.
 
-**Triple-click the button to put it to sleep at once**, e.g. when you leave home. This doesn't work while the setup
-page is on: turn it off first by holding the button for 5 seconds.
+**Click the button five times quickly to put it to sleep at once**, e.g. when you leave home. This doesn't work
+while the setup page is on: turn it off first by holding the button for 5 seconds.
 
 **Push the button once to wake it.** It then starts up again, which takes a few seconds: it connects to your WiFi,
 checks the keys and fetches all departures (`Fetching...`), then shows `U R Good To Go!`.

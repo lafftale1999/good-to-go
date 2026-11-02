@@ -117,6 +117,10 @@ struct gtg_app {
      * and fetched again in the background once it is due, see on_redraw_timer() */
     bool                    redraw;
     TickType_t              redraw_at;
+
+    /* the top row of the shown departure shows its stop name instead of its line and
+     * destination, toggled by a double click. A newly chosen departure starts with the name */
+    bool                    show_stop;
     TaskHandle_t            event_task;
     bool                    ntp_started;
 
@@ -181,7 +185,8 @@ static void log_event(const gtg_event_t *event)
                  event->api_key.which == GTG_API_KEY_TRAFIKLAB ? "Trafiklab" : "Google");
         break;
     case GTG_EV_BUTTON_CLICKED:
-    case GTG_EV_BUTTON_TRIPLE_CLICKED:
+    case GTG_EV_BUTTON_DOUBLE_CLICKED:
+    case GTG_EV_BUTTON_FIVE_CLICKED:
     case GTG_EV_BUTTON_SHORT_HOLD:
     case GTG_EV_BUTTON_LONG_HOLD:
         ESP_LOGI(TAG, "event: %s, button %u", gtg_event_type_name(event->type), event->button.id);
@@ -237,12 +242,13 @@ static void on_config_connection_failed(gtg_app_handle_t app)
     config_mode_start(app);
 }
 
-/* Whether the event is one the configuration takes: anything but a click or a triple click. In
- * the configuration only the short hold, which leaves it, and the long hold, which factory
- * resets, act on the button */
+/* Whether the event is one the configuration takes: anything but a click, double click or five
+ * click. In the configuration only the short hold, which leaves it, and the long hold, which
+ * factory resets, act on the button */
 static bool is_config_button(gtg_event_type_t type)
 {
-    return type != GTG_EV_BUTTON_CLICKED && type != GTG_EV_BUTTON_TRIPLE_CLICKED;
+    return type != GTG_EV_BUTTON_CLICKED && type != GTG_EV_BUTTON_DOUBLE_CLICKED
+        && type != GTG_EV_BUTTON_FIVE_CLICKED;
 }
 
 /* Shows the sleep message and goes to deep sleep, from which the button wakes the device by
@@ -295,7 +301,7 @@ static void event_task(void *arg)
 
         switch (event.type) {
         case GTG_EV_BUTTON_CLICKED:
-        case GTG_EV_BUTTON_TRIPLE_CLICKED:
+        case GTG_EV_BUTTON_FIVE_CLICKED:
         case GTG_EV_BUTTON_SHORT_HOLD:
             ESP_LOGI(TAG, "event: %s, ignored until the device has started", gtg_event_type_name(event.type));
             break;
@@ -695,26 +701,44 @@ static void sync_cache(gtg_app_handle_t app)
     }
 }
 
-/* The top row of a departure: its line and destination. A longer name than the screen is cut,
- * with a '.' as its last character */
-static void format_departure_name(const trafiklab_target_t *target, char top[GTG_LCD_COLUMNS + 1])
+/* Fits text to a row of the screen. A longer text than the screen is cut, with a '.' as its last
+ * character */
+static void format_row(const char *text, char row[GTG_LCD_COLUMNS + 1])
 {
-    char name[GTG_DEPARTURE_LINE_MAX_LEN + GTG_DEPARTURE_DEST_MAX_LEN + 2];
-    snprintf(name, sizeof(name), "%s %s", target->departure.line, target->departure.destination);
-
     /* converted first, so the length is in the characters the LCD shows */
-    char shown[sizeof(name)];
-    size_t len = gtg_lcd_to_ascii(shown, sizeof(shown), name);
+    char shown[GTG_DEPARTURE_LINE_MAX_LEN + GTG_DEPARTURE_DEST_MAX_LEN + GTG_STOP_NAME_MAX_LEN + 2];
+    size_t len = gtg_lcd_to_ascii(shown, sizeof(shown), text);
 
     if (len > GTG_LCD_COLUMNS) {
         shown[GTG_LCD_COLUMNS - 1] = '.';
         shown[GTG_LCD_COLUMNS] = '\0';
     }
-    strlcpy(top, shown, GTG_LCD_COLUMNS + 1);
+    strlcpy(row, shown, GTG_LCD_COLUMNS + 1);
+}
+
+/* The top row of a departure: its line and destination */
+static void format_departure_name(const trafiklab_target_t *target, char top[GTG_LCD_COLUMNS + 1])
+{
+    char name[GTG_DEPARTURE_LINE_MAX_LEN + GTG_DEPARTURE_DEST_MAX_LEN + 2];
+    snprintf(name, sizeof(name), "%s %s", target->departure.line, target->departure.destination);
+    format_row(name, top);
+}
+
+/* The top row of the shown departure: its stop name after a double click, otherwise its line and
+ * destination */
+static void format_top_row(gtg_app_handle_t app, char top[GTG_LCD_COLUMNS + 1])
+{
+    const trafiklab_target_t *target = &app->cache.targets[app->index];
+    if (app->show_stop) {
+        format_row(target->stop.name, top);
+    } else {
+        format_departure_name(target, top);
+    }
 }
 
 /*
- * Draws the chosen departure from the cache, without fetching: its name on the top row and the
+ * Draws the chosen departure from the cache, without fetching: its name, or its stop name after a
+ * double click, on the top row and the
  * minutes to its coming departures on the bottom one, e.g. "now, 13, 28 min".
  *
  * \return ticks until a time on the screen changes, portMAX_DELAY when none will
@@ -724,7 +748,7 @@ static TickType_t draw_departure(gtg_app_handle_t app)
     const gtg_departure_node_t *node = &app->cache.nodes[app->index];
 
     char top[GTG_LCD_COLUMNS + 1];
-    format_departure_name(&app->cache.targets[app->index], top);
+    format_top_row(app, top);
 
     if (node->status != ESP_OK || node->ts == 0) {
         gtg_lcd_print(&app->lcd, top, "Fetch failed");
@@ -906,7 +930,22 @@ static void choose_next(gtg_app_handle_t app)
         app->index = (app->index + 1) % (app->cache.len + 1);
     }
 
+    /* every departure starts with its line and destination */
+    app->show_stop = false;
     show_chosen(app);
+}
+
+/* Toggles the top row of the shown departure between its line and destination and its stop
+ * name. Only while a departure is shown, otherwise the double click does nothing */
+static void toggle_stop_name(gtg_app_handle_t app)
+{
+    if (!app->redraw || app->index >= app->cache.len) {
+        ESP_LOGI(TAG, "no departure shown, the double-click does nothing");
+        return;
+    }
+
+    app->show_stop = !app->show_stop;
+    redraw_departure(app);
 }
 
 /* The start message, which takes the place of the end message: the next click wraps around to
@@ -1064,9 +1103,13 @@ esp_err_t gtg_app_run(gtg_app_handle_t app) {
                     choose_next(app);
                     break;
 
-                case GTG_EV_BUTTON_TRIPLE_CLICKED:
+                case GTG_EV_BUTTON_DOUBLE_CLICKED:
+                    toggle_stop_name(app);
+                    break;
+
+                case GTG_EV_BUTTON_FIVE_CLICKED:
                     log_event(&event);
-                    go_to_sleep(app, "triple-click");
+                    go_to_sleep(app, "five-click");
                     continue;
 
                 case GTG_EV_BUTTON_SHORT_HOLD:
