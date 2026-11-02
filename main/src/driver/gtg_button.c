@@ -49,11 +49,16 @@ static TickType_t ticks_until(int64_t since, int64_t ms)
     return remaining_ms > 0 ? pdMS_TO_TICKS(remaining_ms) + 1 : 0;
 }
 
-/* Posts the clicks of a sequence that ended before the triple click, one event each */
+/* Posts a sequence that ended before the five click: a click or a double click. Three or four
+ * clicks mean nothing and post nothing */
 static void post_clicks(uint8_t clicks)
 {
-    for (uint8_t i = 0; i < clicks; i++) {
+    if (clicks == 1) {
         post_button_event(GTG_EV_BUTTON_CLICKED);
+    } else if (clicks == 2) {
+        post_button_event(GTG_EV_BUTTON_DOUBLE_CLICKED);
+    } else {
+        ESP_LOGI(TAG, "%u clicks, ignored", clicks);
     }
 }
 
@@ -67,8 +72,9 @@ static void post_clicks(uint8_t clicks)
  * release after a hold posts nothing.
  *
  * Clicks are counted in a sequence, each pushed within GTG_BUTTON_MULTI_CLICK_MS of the last one's
- * release. The third click posts the triple click on its release. A sequence that ends before
- * that, with no push within the window, posts its one or two clicks. A push of the sequence that
+ * release. The fifth click posts the five click on its release. A sequence that ends before
+ * that, with no push within the window, posts a click or a double click, three or four clicks
+ * post nothing. A push of the sequence that
  * becomes a hold drops the clicks before it, only the hold is posted.
  */
 static void button_task(void *arg)
@@ -154,9 +160,9 @@ static void button_task(void *arg)
         clicks++;
         released_at = now;
 
-        if (clicks == 3) {
+        if (clicks == GTG_BUTTON_FIVE_CLICKS) {
             clicks = 0;
-            post_button_event(GTG_EV_BUTTON_TRIPLE_CLICKED);
+            post_button_event(GTG_EV_BUTTON_FIVE_CLICKED);
         }
     }
 }

@@ -9,6 +9,7 @@
 #define GTG_BUTTON_SHORT_HOLD_MS    5000    /*!< held this long, a short hold */
 #define GTG_BUTTON_LONG_HOLD_MS     20000   /*!< held this long, a long hold */
 #define GTG_BUTTON_MULTI_CLICK_MS   300     /*!< from a click's release to the next push, the same sequence */
+#define GTG_BUTTON_FIVE_CLICKS      5       /*!< clicks in a sequence that post the five click */
 
 /**
  * \brief Starts reading the button on BUTTON_GPIO from project_config.h
@@ -18,10 +19,14 @@
  * the event queue, see gtg_events.h:
  *  - GTG_EV_BUTTON_CLICKED:         released before GTG_BUTTON_SHORT_HOLD_MS, posted
  *                                   GTG_BUTTON_MULTI_CLICK_MS after the release when no next push
- *                                   follows. Two clicks in a row post two of them
- *  - GTG_EV_BUTTON_TRIPLE_CLICKED:  three clicks, each pushed within GTG_BUTTON_MULTI_CLICK_MS of
- *                                   the last one's release, posted on the third release instead of
- *                                   the clicks
+ *                                   follows
+ *  - GTG_EV_BUTTON_DOUBLE_CLICKED:  two clicks, the second pushed within GTG_BUTTON_MULTI_CLICK_MS
+ *                                   of the first one's release, posted GTG_BUTTON_MULTI_CLICK_MS
+ *                                   after the second release when no third push follows, instead
+ *                                   of the clicks
+ *  - GTG_EV_BUTTON_FIVE_CLICKED:    five clicks, each pushed within GTG_BUTTON_MULTI_CLICK_MS of
+ *                                   the last one's release, posted on the fifth release instead of
+ *                                   the clicks. A sequence of three or four clicks posts nothing
  *  - GTG_EV_BUTTON_SHORT_HOLD:      held for GTG_BUTTON_SHORT_HOLD_MS, right away while still pushed
  *  - GTG_EV_BUTTON_LONG_HOLD:       still held at GTG_BUTTON_LONG_HOLD_MS, right away while still
  *                                   pushed. The short hold was posted before it
